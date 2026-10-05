@@ -1,8 +1,40 @@
+local function BootLog(message)
+    local line = "[Hiruku][BOOT] " .. tostring(message)
+    pcall(function()
+        if type(rconsoleprint) == "function" then rconsoleprint(line .. "\n") end
+    end)
+    warn(line)
+end
+
+BootLog("запуск v20.1.1")
+
 local Fluent
-pcall(function()
-    Fluent = loadstring(game:HttpGet("https://github.com/StyearX/Fluent-modded/releases/download/1.5.1/FluentPro"))()
-end)
-if not Fluent then return warn("[Hiruku] Fluent не загрузился") end
+local fluentSources = {
+    "https://raw.githubusercontent.com/StyearX/Fluent-modded/main/dist/main.lua",
+    "https://github.com/StyearX/Fluent-modded/releases/download/1.5.1/FluentPro",
+}
+local loadErr = nil
+for _, url in ipairs(fluentSources) do
+    local ok, result = pcall(function()
+        if type(loadstring) ~= "function" then error("loadstring недоступен в этом executor") end
+        local body = game:HttpGet(url, true)
+        if type(body) ~= "string" or #body < 1000 then error("Fluent source пустой или повреждён") end
+        local fn, compileErr = loadstring(body)
+        if type(fn) ~= "function" then error(tostring(compileErr or "loadstring вернул не функцию")) end
+        return fn()
+    end)
+    if ok and type(result) == "table" and type(result.CreateWindow) == "function" then
+        Fluent = result
+        BootLog("Fluent загружен: " .. url)
+        break
+    end
+    loadErr = result
+    BootLog("Fluent не загрузился: " .. url .. " | " .. tostring(result))
+end
+if not Fluent then
+    BootLog("КРИТИЧЕСКАЯ ОШИБКА: Fluent не загружен | " .. tostring(loadErr))
+    return
+end
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -12,7 +44,19 @@ local ScriptContext = game:GetService("ScriptContext")
 local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local PathfindingService = game:GetService("PathfindingService")
-local LocalPlayer = Players:GetPlayers()[1]
+local LocalPlayer = Players.LocalPlayer
+if not LocalPlayer then
+    BootLog("LocalPlayer ещё не появился, ожидаю...")
+    local started = os.clock()
+    repeat
+        task.wait()
+        LocalPlayer = Players.LocalPlayer
+    until LocalPlayer or os.clock() - started > 5
+end
+if not LocalPlayer then
+    BootLog("КРИТИЧЕСКАЯ ОШИБКА: LocalPlayer не найден")
+    return
+end
 local Camera = workspace.CurrentCamera
 local ws = workspace
 pcall(function() ws.StreamingTargetRadius = math.max(ws.StreamingTargetRadius, 100000) end)
