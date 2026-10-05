@@ -1,5 +1,5 @@
 -- ============================================================
--- HIRUKU v14 FINAL
+-- HIRUKU v17 FINAL — данные через SlotInfoUpdate
 -- ============================================================
 
 local Fluent
@@ -21,7 +21,7 @@ local ws = workspace
 
 -- ЛОГ
 local logLines = {}
-local MAX_LOG = 5000
+local MAX_LOG = 8000
 local function fileLog(...)
     local parts = {}
     for i = 1, select("#", ...) do parts[i] = tostring(select(i, ...)) end
@@ -61,14 +61,12 @@ THEME.DropdownOutsideWindowBackgroundImages = true
 pcall(function() Fluent:RegisterCustomTheme("HirukuViolet", THEME) end)
 
 local Window = Fluent:CreateWindow({
-    Title = "Hiruku Lua — TSUM", SubTitle = "Resale Hunter v14", Version = "v14.0.0",
+    Title = "Hiruku Lua — TSUM", SubTitle = "Resale Hunter v17", Version = "v17.0.0",
     TabWidth = 130, Size = UDim2.fromOffset(580,410), Acrylic = true,
     Theme = "HirukuViolet", MinimizeKey = Enum.KeyCode.LeftControl, Search = true,
     Icons = "solar/planet-bold", UserInfoTop = true, UserInfoTitle = "Welcome",
     UserInfoSubtitle = LocalPlayer.DisplayName, UserInfoColor = Color3.fromRGB(185,70,255),
 })
-
-pcall(function() Fluent:SetErrorHandler(function(msg) log("UI Error:", msg) end) end)
 
 local Tabs = {
     AutoBuy = Window:AddTab({ Title = "Auto Buy", Icon = "solar/cart-bold" }),
@@ -78,17 +76,17 @@ local Tabs = {
     Settings = Window:AddTab({ Title = "Settings", Icon = "solar/tuning-2-bold" }),
 }
 
--- РЕДКОСТИ (из наших тестов)
+-- КОНСТАНТЫ
 local RARITY_LIST = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Exclusive", "ParisExclusive", "TokyoExclusive", "RickOwens", "RickOwensLegendary"}
 
--- Цвета по редкости
+-- ЗОЛОТОЙ для Legendary
 local RARITY_COLORS = {
-    Common = Color3.fromRGB(150, 150, 150),
-    Uncommon = Color3.fromRGB(0, 200, 0),
-    Rare = Color3.fromRGB(0, 150, 255),
-    Epic = Color3.fromRGB(180, 0, 255),
-    Legendary = Color3.fromRGB(255, 165, 0),
-    Mythic = Color3.fromRGB(255, 0, 100),
+    Common = Color3.fromRGB(180, 180, 180),
+    Uncommon = Color3.fromRGB(100, 200, 100),
+    Rare = Color3.fromRGB(100, 150, 255),
+    Epic = Color3.fromRGB(180, 100, 255),
+    Legendary = Color3.fromRGB(255, 215, 0),   -- ЗОЛОТОЙ
+    Mythic = Color3.fromRGB(255, 80, 80),
     Exclusive = Color3.fromRGB(255, 215, 0),
     ParisExclusive = Color3.fromRGB(200, 150, 255),
     TokyoExclusive = Color3.fromRGB(255, 120, 180),
@@ -96,64 +94,26 @@ local RARITY_COLORS = {
     RickOwensLegendary = Color3.fromRGB(255, 100, 200),
 }
 
--- Приблизительные цены по редкости
-local RARITY_PRICES = {
-    Common = 1000,
-    Uncommon = 2000,
-    Rare = 5000,
-    Epic = 15000,
-    Legendary = 40000,
-    Mythic = 80000,
-    Exclusive = 150000,
-    ParisExclusive = 100000,
-    TokyoExclusive = 100000,
-    RickOwens = 120000,
-    RickOwensLegendary = 200000,
+-- Профиль → bias
+local PROFILE_BIAS = {
+    normal = 0,
+    safe = -0.08,
+    risky = 0.08,
+    jackpot = -0.15,
+    trap = 0.15,
 }
 
--- Классификация по длине ShirtTemplate ID + префиксу
-local function classifyRarity(shirtId, pantsId, hasAccessory)
-    local id = shirtId or pantsId
-    if not id then return "Common" end
-    local idNum = tonumber(id)
-    if not idNum then return "Common" end
-    local len = #tostring(idNum)
-    
-    -- базовая классификация по длине
-    local base = "Common"
-    if len <= 8 then base = "Common"
-    elseif len <= 10 then base = "Uncommon"
-    elseif len <= 11 then base = "Rare"
-    elseif len <= 12 then base = "Epic"
-    elseif len <= 13 then base = "Legendary"
-    else base = "Mythic" end
-    
-    -- если есть аксессуар, может быть RickOwens или Exclusive
-    if hasAccessory and len >= 13 then
-        -- грубо: очень длинные + аксессуар = RickOwens
-        base = "RickOwens"
-    end
-    
-    return base
-end
-
 local state = {
-    -- Chams
-    chams = false, chamsRarity = "Legendary", chamsTask = nil,
-    chamsHighlights = {},
-    -- Help Buy
-    helpBuy = false, helpBuyTask = nil,
-    helpBuyHighlights = {}, helpBuyLabels = {},
-    -- Auto Buy
+    chams = false, chamsRarity = "Legendary", chamsTask = nil, chamsHighlights = {},
+    helpBuy = false, helpBuyTask = nil, helpBuyHighlights = {}, helpBuyLabels = {},
     autoBuy = false, autoBuyRarity = "Legendary", autoBuyTask = nil,
-    -- Full Sell
     fullSell = false, fullSellTask = nil,
-    -- Pathfinding
     autoWalk = false, autoWalkConn = nil, autoWalkTarget = nil,
     currentWaypoints = nil, currentWaypointIndex = 1,
     walkStuckFrames = 0, lastWalkPos = nil,
-    -- Кэш
-    mannequins = {}, lastScan = 0,
+    slotData = {},          -- slotRef → {name, rarity, price, itemConfig, profit}
+    cartUids = {},
+    itemByName = {},        -- name → {fairPrice, economyProfile}
 }
 
 -- ============================================================
@@ -179,96 +139,142 @@ local function getPos(obj)
 end
 
 -- ============================================================
--- СКАН МАНЕКЕНОВ С ОПРЕДЕЛЕНИЕМ РЕДКОСТИ
+-- КОНФИГИ — загружаем имена и цены
 -- ============================================================
-local function scanMannequins()
-    local now = tick()
-    if now - state.lastScan < 3 then return state.mannequins end
-    state.lastScan = now
+local function loadItemConfig()
+    local items = {}
     
-    local mannequins = {}
-    for _, zone in ipairs(ws:GetChildren()) do
-        if zone.Name:find("Shop_ShopZone") then
-            local slots = zone:FindFirstChild("ItemSlots")
-            if slots then
-                for _, slot in ipairs(slots:GetChildren()) do
-                    if slot.Name:match("^Slot_?%d+$") then
-                        local man = slot:FindFirstChild("Mannequin")
-                        if man then
-                            local shirt = man:FindFirstChildOfClass("Shirt")
-                            local pants = man:FindFirstChildOfClass("Pants")
-                            local shirtId = shirt and shirt.ShirtTemplate and shirt.ShirtTemplate:match("rbxassetid://(%d+)")
-                            local pantsId = pants and pants.PantsTemplate and pants.PantsTemplate:match("rbxassetid://(%d+)")
-                            
-                            -- ищем аксессуары
-                            local hasAccessory = false
-                            for _, d in ipairs(man:GetChildren()) do
-                                if d:IsA("Accessory") then hasAccessory = true break end
-                            end
-                            
-                            local rarity = classifyRarity(shirtId, pantsId, hasAccessory)
-                            local price = RARITY_PRICES[rarity] or 1000
-                            
-                            local torso = man:FindFirstChild("Torso")
-                            local detector = torso and torso:FindFirstChild("ClickDetector")
-                            
-                            local pos = getPos(man)
-                            
-                            if pos and detector then
-                                table.insert(mannequins, {
-                                    man = man, slot = slot, zone = zone,
-                                    pos = pos, detector = detector,
-                                    rarity = rarity, price = price,
-                                    shirtId = shirtId, pantsId = pantsId,
-                                    hasAccessory = hasAccessory,
-                                })
-                            end
+    -- ClothingConfig
+    pcall(function()
+        local mod = ReplicatedStorage:FindFirstChild("ClothingConfig")
+        if not mod then return end
+        local ok, cfg = pcall(require, mod)
+        if not ok then return end
+        local shopItems = cfg.SHOP_ITEMS or cfg
+        local function scan(node, depth)
+            if type(node) ~= "table" or depth > 6 then return end
+            if node.name and (node.fairPrice or node.value) then
+                items[node.name:lower()] = {
+                    fairPrice = node.fairPrice or node.value,
+                    profile = node.economyProfile or "normal",
+                }
+                return
+            end
+            for _, c in pairs(node) do scan(c, depth + 1) end
+        end
+        scan(shopItems, 0)
+    end)
+    
+    -- AccessoryConfig
+    pcall(function()
+        local Configs = ReplicatedStorage:FindFirstChild("Configs")
+        local mod = Configs and Configs:FindFirstChild("AccessoryConfig")
+        if not mod then return end
+        local ok, cfg = pcall(require, mod)
+        if not ok then return end
+        local function scan(node, depth)
+            if type(node) ~= "table" or depth > 6 then return end
+            if node.name and (node.fairPrice or node.value) then
+                items[node.name:lower()] = {
+                    fairPrice = node.fairPrice or node.value,
+                    profile = node.economyProfile or "normal",
+                }
+                return
+            end
+            for _, c in pairs(node) do scan(c, depth + 1) end
+        end
+        scan(cfg, 0)
+    end)
+    
+    state.itemByName = items
+    local c = 0
+    for _ in pairs(items) do c = c + 1 end
+    log("Config: " .. c .. " предметов")
+end
+
+loadItemConfig()
+
+-- ============================================================
+-- SLOT INFO UPDATE — главный источник
+-- ============================================================
+local sr = ReplicatedStorage:FindFirstChild("ShopRemotes")
+local removeFromCart = sr and sr:FindFirstChild("RemoveFromCart")
+
+if sr then
+    local siu = sr:FindFirstChild("SlotInfoUpdate")
+    if siu then
+        siu.OnClientEvent:Connect(function(arg)
+            if type(arg) ~= "table" then return end
+            local slots = arg.slots
+            if type(slots) ~= "table" then return end
+            
+            for _, slot in ipairs(slots) do
+                if type(slot) == "table" and slot.slotRef then
+                    local key = typeof(slot.slotRef) == "Instance" and slot.slotRef or tostring(slot.slotRef)
+                    
+                    local cfg = state.itemByName[(slot.name or ""):lower()]
+                    local fairPrice = cfg and cfg.fairPrice or 0
+                    local profile = cfg and cfg.profile or "normal"
+                    local bias = PROFILE_BIAS[profile] or 0
+                    local shopPrice = slot.price or 0
+                    
+                    -- профит = fairPrice * 0.98 - shopPrice * (1 + bias)
+                    local barigaOffer = fairPrice * 0.98
+                    local actualCost = math.floor(shopPrice * (1 + bias))
+                    local profit = math.floor(barigaOffer - actualCost)
+                    
+                    state.slotData[key] = {
+                        name = slot.name,
+                        rarity = slot.rarity,
+                        price = shopPrice,
+                        slotId = slot.slotId,
+                        visualRef = slot.visualRef,
+                        slotRef = slot.slotRef,
+                        fairPrice = fairPrice,
+                        profit = profit,
+                        configFound = cfg ~= nil,
+                    }
+                end
+            end
+            
+            log("SlotInfoUpdate: " .. #slots .. " слотов, кэш: " .. (function() local c=0 for _ in pairs(state.slotData) do c=c+1 end return c end)())
+        end)
+    end
+    
+    local sic = sr:FindFirstChild("SlotInfoClear")
+    if sic then
+        sic.OnClientEvent:Connect(function()
+            state.slotData = {}
+            log("SlotInfoClear — кэш очищен")
+        end)
+    end
+    
+    local cu = sr:FindFirstChild("CartUpdated")
+    if cu then
+        cu.OnClientEvent:Connect(function(...)
+            state.cartUids = {}
+            for _, a in ipairs({...}) do
+                if type(a) == "table" then
+                    for k, v in pairs(a) do
+                        if type(v) == "string" and #v > 20 then
+                            table.insert(state.cartUids, v)
                         end
                     end
                 end
             end
-        end
+        end)
     end
-    
-    state.mannequins = mannequins
-    log("Скан: " .. #mannequins .. " манекенов")
-    return mannequins
-end
-
-local function findNearest(items, fromPos, filterFn)
-    if not fromPos then return nil end
-    local best, bestDist = nil, math.huge
-    for _, item in ipairs(items) do
-        if not filterFn or filterFn(item) then
-            local d = (item.pos - fromPos).Magnitude
-            if d < bestDist then
-                best, bestDist = item, d
-            end
-        end
-    end
-    return best
 end
 
 -- ============================================================
 -- PATHFINDING
 -- ============================================================
-local function forceWalkTo(hum, hrp, targetPos)
+local lastStuckLog = 0
+local function forceWalk(hum, hrp, targetPos)
     if not hum or not hrp or not targetPos then return end
     if hum.WalkSpeed < 16 then hum.WalkSpeed = 24 end
     hum:MoveTo(targetPos)
-    local vel = hrp.AssemblyLinearVelocity
-    local flatVel = Vector3.new(vel.X, 0, vel.Z)
-    if flatVel.Magnitude < 0.5 then
-        local dir = targetPos - hrp.Position
-        dir = Vector3.new(dir.X, 0, dir.Z)
-        if dir.Magnitude > 0.1 then
-            dir = dir.Unit
-            hrp.AssemblyLinearVelocity = Vector3.new(dir.X * 20, vel.Y, dir.Z * 20)
-        end
-    end
 end
-
-local lastStuckLog = 0
 
 local function pathfindTo(targetPos, onArrive, stopDist)
     stopDist = stopDist or 8
@@ -278,10 +284,8 @@ local function pathfindTo(targetPos, onArrive, stopDist)
     state.lastWalkPos = nil
     state.currentWaypoints = nil
     state.currentWaypointIndex = 1
-    
     if state.autoWalkConn then state.autoWalkConn:Disconnect() end
     local fc = 0
-    
     state.autoWalkConn = RunService.Heartbeat:Connect(function()
         if not state.autoWalk then return end
         local c = LocalPlayer.Character
@@ -291,7 +295,6 @@ local function pathfindTo(targetPos, onArrive, stopDist)
         if not hrp or not hum then return end
         local target = state.autoWalkTarget
         if not target then state.autoWalk = false return end
-        
         local dist = (target - hrp.Position).Magnitude
         if dist < stopDist then
             state.autoWalk = false
@@ -299,9 +302,8 @@ local function pathfindTo(targetPos, onArrive, stopDist)
             if onArrive then onArrive() end
             return
         end
-        
         fc = fc + 1
-        if fc % 60 == 0 or not state.currentWaypoints then
+        if fc % 90 == 0 or not state.currentWaypoints then
             pcall(function()
                 local path = PathfindingService:CreatePath({ AgentRadius = 2.5, AgentHeight = 5, AgentCanJump = true })
                 path:ComputeAsync(hrp.Position, target)
@@ -313,7 +315,6 @@ local function pathfindTo(targetPos, onArrive, stopDist)
                 end
             end)
         end
-        
         if state.currentWaypoints and #state.currentWaypoints > 0 then
             local tw = nil
             for i = state.currentWaypointIndex, #state.currentWaypoints do
@@ -326,33 +327,12 @@ local function pathfindTo(targetPos, onArrive, stopDist)
             end
             if tw then
                 if tw.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
-                forceWalkTo(hum, hrp, tw.Position + Vector3.new(0, 2, 0))
+                forceWalk(hum, hrp, tw.Position + Vector3.new(0, 2, 0))
             else
-                forceWalkTo(hum, hrp, target + Vector3.new(0, 2, 0))
+                forceWalk(hum, hrp, target + Vector3.new(0, 2, 0))
             end
         else
-            forceWalkTo(hum, hrp, target + Vector3.new(0, 2, 0))
-        end
-        
-        if not state.lastWalkPos then
-            state.lastWalkPos = hrp.Position
-        else
-            local moved = (hrp.Position - state.lastWalkPos).Magnitude
-            state.lastWalkPos = hrp.Position
-            if moved < 0.02 then
-                state.walkStuckFrames = state.walkStuckFrames + 1
-            else
-                state.walkStuckFrames = 0
-            end
-            if state.walkStuckFrames > 60 then
-                local now = tick()
-                if now - lastStuckLog > 5 then
-                    log("Stuck")
-                    lastStuckLog = now
-                end
-                state.walkStuckFrames = 0
-                state.currentWaypoints = nil
-            end
+            forceWalk(hum, hrp, target + Vector3.new(0, 2, 0))
         end
     end)
 end
@@ -365,14 +345,13 @@ local function stopAutoWalk()
 end
 
 -- ============================================================
--- КЛИКИ / ДЕЙСТВИЯ
+-- КЛИКИ
 -- ============================================================
 local function clickDetector(cd)
     if cd then pcall(function() fireclickdetector(cd) end) end
 end
 
 local function confirmPurchase()
-    local sr = ReplicatedStorage:FindFirstChild("ShopRemotes")
     if sr then
         local cp = sr:FindFirstChild("ConfirmPurchase")
         if cp then pcall(function() cp:FireServer() end) end
@@ -400,7 +379,7 @@ local function findSellerNear(pos)
                     local cd = hrp:FindFirstChild("ClickDetector")
                     local d = (hrp.Position - pos).Magnitude
                     if d < bestDist then
-                        best, bestDist = { seller = seller, pos = hrp.Position, cd = cd }, d
+                        best, bestDist = { pos = hrp.Position, cd = cd }, d
                     end
                 end
             end
@@ -427,7 +406,7 @@ local function sellAllToBariga()
                 local cf = br:FindFirstChild("ConfirmBarigaSale")
                 if cf then
                     pcall(function() cf:FireServer(uids) end)
-                    log("Продажа Барыге:", #uids, "предметов")
+                    log("Продажа Барыге:", #uids)
                 end
             end
         end
@@ -438,9 +417,9 @@ local function sellAllToBariga()
 end
 
 -- ============================================================
--- ХЕЛПЕРЫ ДЛЯ HIGHLIGHT / LABEL
+-- HIGHLIGHT / BILLBOARD
 -- ============================================================
-local function makeHighlight(obj, color, fill, outline)
+local function makeHL(obj, color, fill, outline)
     local ok, hl = pcall(function()
         local h = Instance.new("Highlight")
         h.Name = "HirukuHL"
@@ -465,13 +444,12 @@ local function clearTable(t)
     end
 end
 
-local function makeBillboard(man, text, color)
-    local part = man:FindFirstChild("Torso") or man.PrimaryPart
+local function makeBillboard(part, text, color)
     if not part then return nil end
-    local ok, bg = pcall(function()
+    local ok, bb = pcall(function()
         local b = Instance.new("BillboardGui")
         b.Name = "HirukuLabel"
-        b.Size = UDim2.new(0, 180, 0, 28)
+        b.Size = UDim2.new(0, 240, 0, 32)
         b.StudsOffset = Vector3.new(0, 3.2, 0)
         b.AlwaysOnTop = true
         b.LightInfluence = 0
@@ -489,23 +467,26 @@ local function makeBillboard(man, text, color)
         lbl.Parent = b
         return b
     end)
-    return ok and bg or nil
+    return ok and bb or nil
 end
 
 -- ============================================================
--- 1. CHAMS — только выбранная редкость, без ограничений дальности
+-- 1. CHAMS
 -- ============================================================
 local function updateChams()
     clearTable(state.chamsHighlights)
-    local items = scanMannequins()
-    local color = RARITY_COLORS[state.chamsRarity] or Color3.fromRGB(255, 60, 196)
+    local color = RARITY_COLORS[state.chamsRarity] or Color3.fromRGB(255, 215, 0)
     local cnt = 0
-    for i, item in ipairs(items) do
-        if item.rarity == state.chamsRarity then
-            local hl = makeHighlight(item.man, color, 0.5, 0)
-            if hl then
-                state.chamsHighlights[i] = hl
-                cnt = cnt + 1
+    for key, data in pairs(state.slotData) do
+        if data.rarity == state.chamsRarity then
+            local adornee = (typeof(data.visualRef) == "Instance" and data.visualRef) 
+                            or (typeof(data.slotRef) == "Instance" and data.slotRef)
+            if adornee then
+                local hl = makeHL(adornee, color, 0.4, 0)
+                if hl then
+                    state.chamsHighlights[key] = hl
+                    cnt = cnt + 1
+                end
             end
         end
     end
@@ -518,7 +499,7 @@ local function startChams()
     updateChams()
     state.chamsTask = task.spawn(function()
         while state.chams do
-            task.wait(3)
+            task.wait(2)
             if state.chams then updateChams() end
         end
     end)
@@ -533,29 +514,35 @@ local function stopChams()
 end
 
 -- ============================================================
--- 2. HELP BUY — профит по редкости
+-- 2. HELP BUY
 -- ============================================================
 local function updateHelpBuy()
     clearTable(state.helpBuyHighlights)
     for _, l in pairs(state.helpBuyLabels) do pcall(function() l:Destroy() end) end
     state.helpBuyLabels = {}
-    
-    local items = scanMannequins()
     local cnt = 0
-    for i, item in ipairs(items) do
-        -- профит = fairPrice ≈ price × 0.98 (из наших тестов)
-        local profit = math.floor(item.price * 0.98)
-        -- если прибыль положительная (всегда) — показываем
-        local color = RARITY_COLORS[item.rarity] or Color3.fromRGB(0, 255, 100)
-        local hl = makeHighlight(item.man, color, 0.85, 0)
-        if hl then state.helpBuyHighlights[i] = hl end
-        
-        local text = item.rarity .. " +" .. profit .. "₽"
-        local bg = makeBillboard(item.man, text, color)
-        if bg then state.helpBuyLabels[i] = bg end
-        cnt = cnt + 1
+    for key, data in pairs(state.slotData) do
+        if data.profit and data.profit > 0 then
+            cnt = cnt + 1
+            local color
+            if data.profit >= 4000 then color = Color3.fromRGB(255, 70, 70)
+            elseif data.profit >= 1500 then color = Color3.fromRGB(255, 170, 40)
+            else color = Color3.fromRGB(70, 230, 120) end
+            
+            local adornee = (typeof(data.visualRef) == "Instance" and data.visualRef) 
+                            or (typeof(data.slotRef) == "Instance" and data.slotRef)
+            if adornee then
+                local hl = makeHL(adornee, color, 0.85, 0)
+                if hl then state.helpBuyHighlights[key] = hl end
+                
+                local roi = math.floor((data.profit / data.price) * 100)
+                local text = "[" .. (data.rarity or "?") .. "] $" .. data.price .. " → +$" .. data.profit .. " (" .. roi .. "%)"
+                local bb = makeBillboard(adornee, text, color)
+                if bb then state.helpBuyLabels[key] = bb end
+            end
+        end
     end
-    log("HelpBuy:", cnt)
+    log("HelpBuy count:", cnt)
 end
 
 local function startHelpBuy()
@@ -581,7 +568,7 @@ local function stopHelpBuy()
 end
 
 -- ============================================================
--- 3. AUTO BUY — выбранная редкость
+-- 3. AUTO BUY
 -- ============================================================
 local function autoBuyLoop()
     while state.autoBuy do
@@ -590,24 +577,32 @@ local function autoBuyLoop()
         local _, hrp = getChar()
         if not hrp then continue end
         
-        local items = scanMannequins()
         local targets = {}
-        for _, it in ipairs(items) do
-            if it.rarity == state.autoBuyRarity then
-                table.insert(targets, it)
+        for key, data in pairs(state.slotData) do
+            if data.rarity == state.autoBuyRarity then
+                local adornee = (typeof(data.visualRef) == "Instance" and data.visualRef) 
+                                or (typeof(data.slotRef) == "Instance" and data.slotRef)
+                if adornee then
+                    local pos = getPos(adornee)
+                    if pos then
+                        local torso = adornee:IsA("Model") and adornee:FindFirstChild("Torso")
+                        local cd = torso and torso:FindFirstChild("ClickDetector")
+                        table.insert(targets, { pos = pos, cd = cd, name = data.name })
+                    end
+                end
             end
         end
         log("AutoBuy targets:", #targets)
         if #targets == 0 then continue end
         
-        local nearest = findNearest(targets, hrp.Position)
-        if not nearest then continue end
+        table.sort(targets, function(a, b)
+            return (a.pos - hrp.Position).Magnitude < (b.pos - hrp.Position).Magnitude
+        end)
+        local nearest = targets[1]
         
-        -- идём к манекену
         if (nearest.pos - hrp.Position).Magnitude < 12 then
-            clickDetector(nearest.detector)
+            clickDetector(nearest.cd)
             task.wait(0.4)
-            -- идём к продавцу
             local seller = findSellerNear(hrp.Position)
             if seller and seller.cd then
                 pathfindTo(seller.pos, function()
@@ -638,7 +633,7 @@ local function stopAutoBuy()
 end
 
 -- ============================================================
--- 4. FULL SELL — топ профит, покупка, продажа Барыге
+-- 4. FULL-SELL
 -- ============================================================
 local function fullSellLoop()
     while state.fullSell do
@@ -647,29 +642,36 @@ local function fullSellLoop()
         local _, hrp = getChar()
         if not hrp then continue end
         
-        local items = scanMannequins()
-        -- сортируем по профиту (по редкости)
         local targets = {}
-        for _, it in ipairs(items) do
-            it.profit = math.floor(it.price * 0.98)
-            table.insert(targets, it)
+        for key, data in pairs(state.slotData) do
+            if data.profit and data.profit > 0 then
+                local adornee = (typeof(data.visualRef) == "Instance" and data.visualRef) 
+                                or (typeof(data.slotRef) == "Instance" and data.slotRef)
+                if adornee then
+                    local pos = getPos(adornee)
+                    if pos then
+                        local torso = adornee:IsA("Model") and adornee:FindFirstChild("Torso")
+                        local cd = torso and torso:FindFirstChild("ClickDetector")
+                        table.insert(targets, { pos = pos, cd = cd, profit = data.profit, name = data.name })
+                    end
+                end
+            end
         end
         table.sort(targets, function(a, b) return a.profit > b.profit end)
+        log("FullSell targets:", #targets)
         
-        -- скупаем топ 5
         for i = 1, math.min(#targets, 5) do
             if not state.fullSell then break end
             local it = targets[i]
             if (it.pos - hrp.Position).Magnitude < 12 then
-                clickDetector(it.detector)
+                clickDetector(it.cd)
                 task.wait(0.3)
             else
-                pathfindTo(it.pos, function() clickDetector(it.detector) end, 10)
+                pathfindTo(it.pos, function() clickDetector(it.cd) end, 10)
                 task.wait(1)
             end
         end
         
-        -- к продавцу
         local seller = findSellerNear(hrp.Position)
         if seller and seller.cd then
             pathfindTo(seller.pos, function()
@@ -680,7 +682,6 @@ local function fullSellLoop()
             task.wait(1)
         end
         
-        -- к Барыге
         local bariga = findBariga()
         if bariga then
             pathfindTo(bariga.pos, function()
@@ -707,7 +708,7 @@ local function stopFullSell()
 end
 
 -- ============================================================
--- КНОПКА + SAVE LOG
+-- КНОПКА + SAVE
 -- ============================================================
 local toggleGui = Instance.new("ScreenGui")
 toggleGui.Name = "HirukuOpenUi"
@@ -728,7 +729,6 @@ mainBtn.TextSize = 24
 mainBtn.Font = Enum.Font.GothamBold
 mainBtn.AutoButtonColor = false
 mainBtn.ClipsDescendants = true
-
 local corner = Instance.new("UICorner", mainBtn)
 corner.CornerRadius = UDim.new(0.25, 0)
 local stroke = Instance.new("UIStroke", mainBtn)
@@ -775,45 +775,13 @@ UserInputService.InputChanged:Connect(function(input)
 end)
 
 local uiOpen = true
-local function PlaySound(sid)
-    pcall(function()
-        local s = Instance.new("Sound")
-        s.SoundId = "rbxassetid://" .. sid
-        s.Parent = SoundService
-        s:Play()
-        s.Ended:Connect(function() s:Destroy() end)
-    end)
-end
-
-local function findWindowFrame()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return nil end
-    for _, gui in ipairs(pg:GetChildren()) do
-        if gui:IsA("ScreenGui") and gui.Name:lower():find("fluent") then
-            for _, obj in ipairs(gui:GetDescendants()) do
-                if obj:IsA("Frame") and obj.Size.X.Offset > 300 then return obj end
-            end
-        end
-    end
-    return nil
-end
-
 mainBtn.MouseButton1Click:Connect(function()
-    PlaySound(({"7127123605","438666542"})[math.random(2)])
     uiOpen = not uiOpen
-    if uiOpen then
-        pcall(function() Window:Show() end)
-    else
-        pcall(function() Window:Hide() end)
-    end
-    local orig = UDim2.new(0, 60, 0, 60)
-    local press = UDim2.new(0, 48, 0, 48)
-    pcall(function() TweenService:Create(mainBtn, TweenInfo.new(0.08), {Size = press}):Play() end)
-    task.wait(0.08)
-    pcall(function() TweenService:Create(mainBtn, TweenInfo.new(0.18), {Size = orig}):Play() end)
+    if uiOpen then pcall(function() Window:Show() end)
+    else pcall(function() Window:Hide() end) end
 end)
 
--- SAVE LOG кнопка
+-- SAVE LOG
 local saveGui = Instance.new("ScreenGui")
 saveGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
 saveGui.ResetOnSpawn = false
@@ -827,8 +795,6 @@ saveBtn.Text = "SAVE LOG (0)"
 saveBtn.TextSize = 14
 saveBtn.Font = Enum.Font.GothamBold
 saveBtn.AutoButtonColor = false
-saveBtn.BorderSizePixel = 0
-saveBtn.ZIndex = 200
 local sc = Instance.new("UICorner", saveBtn)
 sc.CornerRadius = UDim.new(0, 10)
 task.spawn(function()
@@ -838,66 +804,38 @@ task.spawn(function()
     end
 end)
 saveBtn.MouseButton1Click:Connect(function()
-    if not writefile then saveBtn.Text = "НЕТ writefile" task.wait(2) return end
+    if not writefile then return end
     local name = "hiruku_log_" .. game.PlaceId .. "_" .. os.time() .. ".txt"
-    local ok = pcall(function() writefile(name, table.concat(logLines, "\n")) end)
-    if ok then saveBtn.Text = "✓ " .. name print("[Hiruku] " .. name)
-    else saveBtn.Text = "ОШИБКА" end
+    pcall(function() writefile(name, table.concat(logLines, "\n")) end)
+    saveBtn.Text = "✓ " .. name
     task.wait(3)
-    saveBtn.Text = "SAVE LOG (" .. #logLines .. ")"
 end)
 
--- ============================================================
--- UI ЭЛЕМЕНТЫ
--- ============================================================
-
--- AUTO BUY
+-- UI
 local secAB = Tabs.AutoBuy:AddSection("Auto Buy", "solar/cart-bold")
 secAB:AddDropdown("ABRarity", { Title = "Редкость", Icon = "solar/star-bold", Values = RARITY_LIST, Default = "Legendary", Multi = false,
     Callback = function(v) if type(v) == "table" then for k in pairs(v) do state.autoBuyRarity = k break end else state.autoBuyRarity = v end end })
-secAB:AddToggle("ABToggle", { Title = "Auto Buy", Description = "Скупает выбранную редкость", Icon = "solar/cart-bold", Default = false,
+secAB:AddToggle("ABToggle", { Title = "Auto Buy", Description = "Идёт и покупает выбранную редкость", Icon = "solar/cart-bold", Default = false,
     Callback = function(v) if v then startAutoBuy() else stopAutoBuy() end end })
 
--- HELP BUY
 local secHB = Tabs.HelpBuy:AddSection("Help Buy", "solar/lightbulb-bold")
-secHB:AddToggle("HBToggle", { Title = "Help Buy", Description = "Показывает профит каждой вещи", Icon = "solar/lightbulb-bold", Default = false,
+secHB:AddToggle("HBToggle", { Title = "Help Buy", Description = "Показывает профит", Icon = "solar/lightbulb-bold", Default = false,
     Callback = function(v) if v then startHelpBuy() else stopHelpBuy() end end })
 
--- CHAMS
 local secCH = Tabs.Chams:AddSection("Chams", "solar/eye-bold")
 secCH:AddDropdown("CHRarity", { Title = "Редкость", Icon = "solar/star-bold", Values = RARITY_LIST, Default = "Legendary", Multi = false,
     Callback = function(v)
         if type(v) == "table" then for k in pairs(v) do state.chamsRarity = k break end else state.chamsRarity = v end
         if state.chams then updateChams() end
     end })
-secCH:AddToggle("CHToggle", { Title = "Chams", Description = "Подсветка через стены, без ограничений дальности", Icon = "solar/eye-bold", Default = false,
+secCH:AddToggle("CHToggle", { Title = "Chams", Description = "Подсветка через стены", Icon = "solar/eye-bold", Default = false,
     Callback = function(v) if v then startChams() else stopChams() end end })
 
--- FULL SELL
 local secFS = Tabs.FullSell:AddSection("Full-Sell", "solar/dollar-bold")
 secFS:AddToggle("FSToggle", { Title = "Auto Full-Sell", Description = "Скупает топ → Продавец → Барыга", Icon = "solar/dollar-bold", Default = false,
     Callback = function(v) if v then startFullSell() else stopFullSell() end end })
 
--- SETTINGS
-local secSET = Tabs.Settings:AddSection("Font", "solar/text-bold")
-local FONT_LIST = {"Gotham", "GothamBold", "SourceSans", "SourceSansBold", "Code", "Roboto", "RobotoCondensed", "Ubuntu", "Arial", "Antique", "Fantasy", "SciFi", "Cartoon"}
-local function applyFont(fontName)
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return end
-    for _, gui in ipairs(pg:GetChildren()) do
-        if gui.Name == "HirukuOpenUi" or gui.Name:lower():find("fluent") then
-            for _, obj in ipairs(gui:GetDescendants()) do
-                if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
-                    pcall(function() obj.Font = Enum.Font[fontName] end)
-                end
-            end
-        end
-    end
-end
-secSET:AddDropdown("FontPicker", { Title = "Font", Icon = "solar/text-bold", Values = FONT_LIST, Default = "Gotham", Multi = false,
-    Callback = function(v) if type(v) == "table" then for k in pairs(v) do applyFont(k) break end else applyFont(v) end end })
-
 Fluent:SetTheme("HirukuViolet")
-Notify("Hiruku Lua — TSUM", "v14 загружен", "Success", "solar/planet-bold", 4)
-log("=== v14 READY ===")
+Notify("Hiruku Lua — TSUM", "v17 загружен", "Success", "solar/planet-bold", 4)
+log("=== v17 READY ===")
 task.delay(0.5, function() pcall(function() Window:SelectTab(1) end) end)
