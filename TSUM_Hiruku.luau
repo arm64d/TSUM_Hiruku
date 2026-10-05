@@ -40,7 +40,7 @@ THEME.DropdownOutsideWindowBackgroundImages = true
 pcall(function() Fluent:RegisterCustomTheme("HirukuViolet", THEME) end)
 
 local Window = Fluent:CreateWindow({
-    Title = "Hiruku Lua — TSUM", SubTitle = "Resale Hunter v20", Version = "v20.0.0",
+    Title = "Hiruku Lua — TSUM", SubTitle = "Resale Hunter v20", Version = "v20.1.0",
     TabWidth = 130, Size = UDim2.fromOffset(580,410), Acrylic = true,
     Theme = "HirukuViolet", MinimizeKey = Enum.KeyCode.LeftControl, Search = true,
     Icons = "solar/planet-bold", UserInfoTop = true, UserInfoTitle = "Welcome",
@@ -367,11 +367,29 @@ local function sellAllToBariga(onDone)
     if onDone then onDone() end
 end
 
+local function getItemMannequin(ref)
+    if not ref then return nil end
+    local man = ref:FindFirstChild("Mannequin")
+    if man then return man end
+    return nil
+end
+
+local function getItemDetector(ref)
+    local man = getItemMannequin(ref)
+    if not man then return nil end
+    local torso = man:FindFirstChild("Torso")
+    if not torso then return nil end
+    return torso:FindFirstChild("ClickDetector")
+end
+
 local function buyItemsList(itemsList, onDone)
     if #itemsList == 0 then 
+        Notify("Buy", "Список пуст", "Error", nil, 3)
         if onDone then onDone() end
         return 
     end
+    
+    Notify("Buy", "Покупаем " .. #itemsList .. " предметов", "Info", nil, 2)
     
     local bestSeller, bestDist = nil, math.huge
     local _, hrp = getChar()
@@ -393,7 +411,10 @@ local function buyItemsList(itemsList, onDone)
         end
     end
     
-    if not bestSeller then return end
+    if not bestSeller then 
+        Notify("Buy", "Продавец не найден", "Error", nil, 3)
+        return 
+    end
     
     local idx = 1
     local function nextItem()
@@ -449,29 +470,54 @@ local function makeHL(obj, color, fill)
     return ok and hl or nil
 end
 
+local function countSlotsByRarity()
+    local counts = {}
+    for _, data in pairs(state.slotData) do
+        local r = data.rarity or "nil"
+        counts[r] = (counts[r] or 0) + 1
+    end
+    return counts
+end
+
 local function updateChams()
     clearTable(state.chamsHighlights)
     if not state.chams then return end
     local color = RARITY_COLORS[state.chamsRarity] or Color3.fromRGB(255, 180, 30)
+    local cnt = 0
     for ref, data in pairs(state.slotData) do
         if data.rarity == state.chamsRarity and ref.Parent then
             local hl = makeHL(ref, color, 0.4)
             if hl then state.chamsHighlights[ref] = hl end
+            cnt = cnt + 1
         end
     end
+    return cnt
 end
 
 local function startChams()
     if state.chams then return end
     state.chams = true
-    updateChams()
+    local cnt = updateChams() or 0
+    local total = 0
+    for _ in pairs(state.slotData) do total = total + 1 end
+    
+    if cnt == 0 then
+        local counts = countSlotsByRarity()
+        local line = ""
+        for r, c in pairs(counts) do
+            line = line .. r .. ":" .. c .. " "
+        end
+        Notify("Chams", "0 из " .. state.chamsRarity .. " | В кэше: " .. (line ~= "" and line or "пусто"), "Info", nil, 5)
+    else
+        Notify("Chams", state.chamsRarity .. " × " .. cnt, "Success", nil, 3)
+    end
+    
     state.chamsTask = task.spawn(function()
         while state.chams do
             task.wait(3)
             if state.chams then updateChams() end
         end
     end)
-    Notify("Chams", state.chamsRarity, "Success", nil, 3)
 end
 
 local function stopChams()
@@ -558,12 +604,23 @@ local function getMannequinsByRarity(rarity)
     local list = {}
     for ref, data in pairs(state.slotData) do
         if data.rarity == rarity and ref.Parent then
-            local parent = ref.Parent
-            local man = parent and parent:FindFirstChild("Mannequin")
-            local torso = man and man:FindFirstChild("Torso")
-            local cd = torso and torso:FindFirstChild("ClickDetector")
             local pos = getPos(ref)
+            local cd = getItemDetector(ref)
             if pos then
+                table.insert(list, { pos = pos, detector = cd, data = data, ref = ref })
+            end
+        end
+    end
+    return list
+end
+
+local function getAllItems()
+    local list = {}
+    for ref, data in pairs(state.slotData) do
+        if ref.Parent and data.profit and data.profit > 0 then
+            local pos = getPos(ref)
+            local cd = getItemDetector(ref)
+            if pos and cd then
                 table.insert(list, { pos = pos, detector = cd, data = data, ref = ref })
             end
         end
@@ -580,7 +637,21 @@ local function autoBuyLoop()
         if not hrp then continue end
         
         local targets = getMannequinsByRarity(state.autoBuyRarity)
-        if #targets == 0 then continue end
+        
+        if #targets == 0 then
+            local counts = countSlotsByRarity()
+            local has = false
+            for r, c in pairs(counts) do
+                if r == state.autoBuyRarity then has = true break end
+            end
+            if not has then
+                Notify("Auto Buy", "Нет " .. state.autoBuyRarity .. " в кэше", "Error", nil, 3)
+                task.wait(3)
+            end
+            continue 
+        end
+        
+        Notify("Auto Buy", "Целей " .. #targets, "Info", nil, 2)
         
         table.sort(targets, function(a, b) return (a.data.profit or 0) > (b.data.profit or 0) end)
         
@@ -631,21 +702,15 @@ local function fullSellLoop()
         local _, hrp = getChar()
         if not hrp then continue end
         
-        local targets = {}
-        for ref, data in pairs(state.slotData) do
-            if ref.Parent and data.profit and data.profit > 0 then
-                local parent = ref.Parent
-                local man = parent and parent:FindFirstChild("Mannequin")
-                local torso = man and man:FindFirstChild("Torso")
-                local cd = torso and torso:FindFirstChild("ClickDetector")
-                local pos = getPos(ref)
-                if pos and cd then
-                    table.insert(targets, { pos = pos, detector = cd, data = data, ref = ref })
-                end
-            end
+        local targets = getAllItems()
+        
+        if #targets == 0 then
+            Notify("Full-Sell", "Нет прибыльных в кэше", "Info", nil, 2)
+            task.wait(3)
+            continue 
         end
         
-        if #targets == 0 then continue end
+        Notify("Full-Sell", "Целей " .. #targets, "Info", nil, 2)
         table.sort(targets, function(a, b) return (a.data.profit or 0) > (b.data.profit or 0) end)
         
         local balance = getBalance()
@@ -806,6 +871,20 @@ secSET:AddSlider("WalkSpeed", {
 })
 
 secSET:AddButton({
+    Title = "Редкости в кэше", Description = "Покажет какие редкости сейчас в кэше",
+    Icon = "solar/list-bold",
+    Callback = function()
+        local counts = countSlotsByRarity()
+        local line = ""
+        for r, c in pairs(counts) do
+            line = line .. r .. ":" .. c .. "  "
+        end
+        if line == "" then line = "пусто" end
+        Notify("Кэш", line, "Info", nil, 6)
+    end
+})
+
+secSET:AddButton({
     Title = "Очистить кэш", Description = "Сбросить сохранённые данные о слотах",
     Icon = "solar/trash-bin-bold",
     Callback = function()
@@ -831,16 +910,6 @@ secSET:AddButton({
     end
 })
 
-secSET:AddButton({
-    Title = "Список кэша", Description = "Сколько предметов в кэше",
-    Icon = "solar/list-bold",
-    Callback = function()
-        local c = 0
-        for _ in pairs(state.slotData) do c = c + 1 end
-        Notify("Кэш", c .. " предметов", "Info", nil, 3)
-    end
-})
-
 Fluent:SetTheme("HirukuViolet")
-Notify("Hiruku Lua — TSUM", "v20 загружен", "Success", "solar/planet-bold", 4)
+Notify("Hiruku Lua — TSUM", "v20.1 загружен", "Success", "solar/planet-bold", 4)
 task.delay(0.5, function() pcall(function() Window:SelectTab(1) end) end)
