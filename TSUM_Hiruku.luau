@@ -1,12 +1,32 @@
-local function BootLog(message)
-    local line = "[Hiruku][BOOT] " .. tostring(message)
+local function HirukuOutput(line, isError)
     pcall(function()
-        if type(rconsoleprint) == "function" then rconsoleprint(line .. "\n") end
+        if isError and type(rconsoleerr) == "function" then
+            rconsoleerr(tostring(line) .. "\n")
+        elseif type(rconsoleprint) == "function" then
+            rconsoleprint(tostring(line) .. "\n")
+        end
     end)
-    warn(line)
+    pcall(function()
+        if isError and type(warn) == "function" then
+            warn(tostring(line))
+        elseif type(print) == "function" then
+            print(tostring(line))
+        elseif type(warn) == "function" then
+            warn(tostring(line))
+        end
+    end)
 end
 
-BootLog("запуск v20.1.1")
+local function HirukuFatal(message)
+    HirukuOutput("[Hiruku][FATAL] " .. tostring(message), true)
+end
+
+local function HirukuMain()
+    local function BootLog(message)
+        HirukuOutput("[Hiruku][BOOT] " .. tostring(message), false)
+    end
+
+    BootLog("запуск v20.1.3")
 
 local Fluent
 local fluentSources = {
@@ -288,6 +308,8 @@ if Configs then
     end
 end
 
+local stopWalk
+
 local state = {
     chams = false, chamsRarity = "All", chamsTask = nil, chamsHighlights = {}, chamsProxies = {},
     helpBuy = false, helpBuyTask = nil, helpBuyHighlights = {}, helpBuyLabels = {},
@@ -307,7 +329,7 @@ local function getChar()
 end
 
 LocalPlayer.CharacterAdded:Connect(function()
-    stopWalk()
+    if stopWalk then stopWalk() end
     task.wait(0.5)
     local c = LocalPlayer.Character
     local hum = c and c:FindFirstChildOfClass("Humanoid")
@@ -461,7 +483,7 @@ end
 for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do hookShopRemote(obj) end
 ReplicatedStorage.DescendantAdded:Connect(function(obj) task.defer(function() hookShopRemote(obj) end) end)
 
-local function stopWalk()
+stopWalk = function()
     state.walking = false
     state.walkWaypoints = nil
     if state.walkConn then state.walkConn:Disconnect() state.walkConn = nil end
@@ -1465,3 +1487,19 @@ secSET:AddButton({
 pcall(function() Fluent:SetTheme("HirukuViolet") end)
 Notify("Hiruku Lua — TSUM", "v20.1.2 загружен", "Success", "solar/planet-bold", 4)
 task.delay(0.5, function() pcall(function() Window:SelectTab(1) end) end)
+
+end
+
+local __hirukuOk, __hirukuErr = xpcall(HirukuMain, function(err)
+    local trace = tostring(err)
+    pcall(function()
+        if debug and type(debug.traceback) == "function" then
+            trace = debug.traceback(trace, 2)
+        end
+    end)
+    return trace
+end)
+
+if not __hirukuOk then
+    HirukuFatal(__hirukuErr)
+end
