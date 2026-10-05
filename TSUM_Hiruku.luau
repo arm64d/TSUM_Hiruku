@@ -153,14 +153,47 @@ end
 
 local function getBalance()
     local balance = 0
+    local function accept(v)
+        v = tonumber(v)
+        if v and v >= 0 then
+            balance = math.max(balance, v)
+        end
+    end
     pcall(function()
-        local remotes = ReplicatedStorage:FindFirstChild("TsumBankRemotes") or ReplicatedStorage:FindFirstChild("ATMRemotes")
-        if remotes then
-            local gb = remotes:FindFirstChild("GetBalance")
-            if gb and gb:IsA("RemoteFunction") then
-                local ok, res = pcall(function() return gb:InvokeServer() end)
-                if ok and tonumber(res) then
-                    balance = tonumber(res)
+        local containers = {
+            ReplicatedStorage:FindFirstChild("TsumBankRemotes"),
+            ReplicatedStorage:FindFirstChild("ATMRemotes"),
+            ReplicatedStorage:FindFirstChild("ShopRemotes"),
+            ReplicatedStorage:FindFirstChild("Remotes")
+        }
+        for _, folder in ipairs(containers) do
+            if folder then
+                for _, name in ipairs({"GetBalance", "GetCash", "GetMoney", "GetCoins", "GetCurrency", "GetWallet", "Balance", "Cash", "Money"}) do
+                    local obj = folder:FindFirstChild(name)
+                    if obj and obj:IsA("RemoteFunction") then
+                        local ok, res = pcall(function() return obj:InvokeServer() end)
+                        if ok then
+                            if type(res) == "table" then
+                                accept(res.Balance or res.balance or res.Cash or res.cash or res.Money or res.money or res.Coins or res.coins or res.Amount or res.amount)
+                            else
+                                accept(res)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end)
+    pcall(function()
+        local player = Players.LocalPlayer
+        local containers = {player, player:FindFirstChild("leaderstats"), player:FindFirstChild("Data")}
+        for _, container in ipairs(containers) do
+            if container then
+                for _, name in ipairs({"Balance", "balance", "Cash", "cash", "Money", "money", "Coins", "coins", "Currency", "currency", "Wallet", "wallet"}) do
+                    local obj = container:FindFirstChild(name)
+                    if obj and (obj:IsA("IntValue") or obj:IsA("NumberValue")) then accept(obj.Value) end
+                    local attr = container:GetAttribute(name)
+                    if attr ~= nil then accept(attr) end
                 end
             end
         end
@@ -566,15 +599,26 @@ local function updateChams()
     clearTable(state.chamsHighlights)
     if not state.chams then return end
     local color = RARITY_COLORS[state.chamsRarity] or Color3.fromRGB(255, 180, 30)
+    local seen = {}
     local cnt = 0
     for ref, data in pairs(state.slotData) do
-        if data.rarity == state.chamsRarity and ref.Parent then
-            local man = getItemMannequin(ref)
-            local hl = man and makeHL(man, color, 0.4)
-            if hl then state.chamsHighlights[ref] = hl end
-            cnt = cnt + 1
+        local man = getItemMannequin(ref)
+        if data.rarity == state.chamsRarity and man and man.Parent then
+            local hl = makeHL(man, color, 0.4)
+            if hl then state.chamsHighlights[man] = hl; seen[man] = true; cnt += 1 end
         end
     end
+    pcall(function()
+        for _, obj in ipairs(workspace:GetDescendants()) do
+            if obj:IsA("Model") and obj.Name == "Mannequin" and not seen[obj] then
+                local rarity = obj:GetAttribute("Rarity") or obj:GetAttribute("rarity")
+                if rarity == state.chamsRarity then
+                    local hl = makeHL(obj, color, 0.4)
+                    if hl then state.chamsHighlights[obj] = hl; seen[obj] = true; cnt += 1 end
+                end
+            end
+        end
+    end)
     return cnt
 end
 
