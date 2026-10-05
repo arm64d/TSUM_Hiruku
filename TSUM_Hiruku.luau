@@ -131,21 +131,68 @@ THEME.ViewportBackgroundImages = true
 THEME.DropdownOutsideWindowBackgroundImages = true
 pcall(function() Fluent:RegisterCustomTheme("HirukuViolet", THEME) end)
 
-local Window = Fluent:CreateWindow({
-    Title = "Hiruku Lua — TSUM", SubTitle = "Resale Hunter v20", Version = "v20.1.0",
-    TabWidth = 130, Size = UDim2.fromOffset(580,410), Acrylic = true,
-    Theme = "HirukuViolet", MinimizeKey = Enum.KeyCode.LeftControl, Search = true,
-    Icons = "solar/planet-bold", UserInfoTop = true, UserInfoTitle = "Welcome",
-    UserInfoSubtitle = LocalPlayer.DisplayName, UserInfoColor = Color3.fromRGB(185,70,255),
-})
+local Window
+do
+    local ok, result = pcall(function()
+        return Fluent:CreateWindow({
+            Title = "Hiruku Lua — TSUM",
+            SubTitle = "Resale Hunter v20",
+            Version = "v20.1.2",
+            TabWidth = 130,
+            Size = UDim2.fromOffset(580,410),
+            Acrylic = false,
+            Theme = "HirukuViolet",
+            MinimizeKey = Enum.KeyCode.LeftControl,
+            Icons = "solar/planet-bold",
+        })
+    end)
+    if ok and result then
+        Window = result
+    else
+        HLog("ERROR", "CreateWindow failed", result)
+        local fallbackOk, fallback = pcall(function()
+            return Fluent:CreateWindow({
+                Title = "Hiruku Lua — TSUM",
+                SubTitle = "Resale Hunter v20",
+                TabWidth = 130,
+                Size = UDim2.fromOffset(580,410),
+                Acrylic = false,
+                Theme = "Dark",
+                MinimizeKey = Enum.KeyCode.LeftControl,
+            })
+        end)
+        if fallbackOk and fallback then
+            Window = fallback
+            HLog("BOOT", "Fallback window created")
+        else
+            HLog("ERROR", "Fallback CreateWindow failed", fallback)
+            return
+        end
+    end
+end
 
-local Tabs = {
-    AutoBuy = Window:AddTab({ Title = "Auto Buy", Icon = "solar/cart-bold" }),
-    HelpBuy = Window:AddTab({ Title = "Help Buy", Icon = "solar/lightbulb-bold" }),
-    Chams = Window:AddTab({ Title = "Chams", Icon = "solar/eye-bold" }),
-    FullSell = Window:AddTab({ Title = "Full-Sell", Icon = "solar/dollar-bold" }),
-    Settings = Window:AddTab({ Title = "Settings", Icon = "solar/tuning-2-bold" }),
-}
+local Tabs = {}
+local function AddTabSafe(key, title, icon)
+    local ok, tab = pcall(function()
+        return Window:AddTab({ Title = title, Icon = icon })
+    end)
+    if not ok or not tab then
+        HLog("ERROR", "AddTab failed", key, tab)
+        return nil
+    end
+    Tabs[key] = tab
+    return tab
+end
+
+AddTabSafe("AutoBuy", "Auto Buy", "solar/cart-bold")
+AddTabSafe("HelpBuy", "Help Buy", "solar/lightbulb-bold")
+AddTabSafe("Chams", "Chams", "solar/eye-bold")
+AddTabSafe("FullSell", "Full-Sell", "solar/dollar-bold")
+AddTabSafe("Settings", "Settings", "solar/tuning-2-bold")
+if not (Tabs.AutoBuy and Tabs.HelpBuy and Tabs.Chams and Tabs.FullSell and Tabs.Settings) then
+    HLog("ERROR", "One or more tabs failed to initialize")
+    return
+end
 
 local RARITY_LIST = {"All", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Exclusive", "ParisExclusive", "TokyoExclusive", "RickOwens", "RickOwensLegendary"}
 
@@ -1415,6 +1462,6 @@ secSET:AddButton({
     end
 })
 
-Fluent:SetTheme("HirukuViolet")
-Notify("Hiruku Lua — TSUM", "v20.1 загружен", "Success", "solar/planet-bold", 4)
+pcall(function() Fluent:SetTheme("HirukuViolet") end)
+Notify("Hiruku Lua — TSUM", "v20.1.2 загружен", "Success", "solar/planet-bold", 4)
 task.delay(0.5, function() pcall(function() Window:SelectTab(1) end) end)
