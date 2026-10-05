@@ -12,6 +12,7 @@ local PathfindingService = game:GetService("PathfindingService")
 local LocalPlayer = Players:GetPlayers()[1]
 local Camera = workspace.CurrentCamera
 local ws = workspace
+pcall(function() ws.StreamingTargetRadius = math.max(ws.StreamingTargetRadius, 100000) end)
 
 local function Notify(t, c, ty, i, d)
     pcall(function() Fluent:Notify({ Title = t, Content = c, Type = ty or "Info", Icon = i, Duration = d or 3 }) end)
@@ -55,7 +56,7 @@ local Tabs = {
     Settings = Window:AddTab({ Title = "Settings", Icon = "solar/tuning-2-bold" }),
 }
 
-local RARITY_LIST = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Exclusive", "ParisExclusive", "TokyoExclusive", "RickOwens", "RickOwensLegendary"}
+local RARITY_LIST = {"All", "Common", "Uncommon", "Rare", "Epic", "Legendary", "Mythic", "Exclusive", "ParisExclusive", "TokyoExclusive", "RickOwens", "RickOwensLegendary"}
 
 local RARITY_COLORS = {
     Common = Color3.fromRGB(140, 140, 145),
@@ -70,6 +71,43 @@ local RARITY_COLORS = {
     RickOwens = Color3.fromRGB(200, 200, 200),
     RickOwensLegendary = Color3.fromRGB(220, 220, 220),
 }
+
+
+local function normalizeRarity(v)
+    if v == nil then return nil end
+    local s = tostring(v):gsub("%s+", "")
+    local low = s:lower()
+    for _, rarity in ipairs(RARITY_LIST) do
+        if rarity:lower() == low then return rarity end
+    end
+    return tostring(v)
+end
+
+local function parseMoneyText(v)
+    if v == nil then return nil end
+    local s = tostring(v)
+    local raw = s:match("([%d][%d%.,%s]*)%s*[₽$€₽]") or s:match("[₽$€]%s*([%d][%d%.,%s]*)")
+    if not raw then raw = s:match("(%d[%d%.,%s]*)") end
+    if not raw then return nil end
+    raw = raw:gsub("%s", ""):gsub("%.", ""):gsub(",", ".")
+    local n = tonumber(raw)
+    if n and n >= 0 then return n end
+    return nil
+end
+
+local function getItemShop(ref)
+    local obj = ref
+    while obj and obj ~= ws do
+        if obj.Name:find("Shop_ShopZone") then
+            local seller = obj:FindFirstChild("Seller", true)
+            local hrp = seller and seller:FindFirstChild("HumanoidRootPart")
+            if hrp then return obj, seller, hrp end
+            return obj, nil, nil
+        end
+        obj = obj.Parent
+    end
+    return nil, nil, nil
+end
 
 local PROFILE_BIAS = {
     normal = 0, safe = -0.08, risky = 0.08, jackpot = -0.15, trap = 0.15,
@@ -114,7 +152,7 @@ if Configs then
 end
 
 local state = {
-    chams = false, chamsRarity = "Legendary", chamsTask = nil, chamsHighlights = {}, chamsProxies = {},
+    chams = false, chamsRarity = "All", chamsTask = nil, chamsHighlights = {}, chamsProxies = {},
     helpBuy = false, helpBuyTask = nil, helpBuyHighlights = {}, helpBuyLabels = {},
     autoBuy = false, autoBuyRarity = "Legendary", autoBuyTask = nil,
     fullSell = false, fullSellTask = nil,
@@ -152,90 +190,142 @@ local function getPos(obj)
 end
 
 local function getBalance()
-    local balance = 0
-    local function accept(v)
-        v = tonumber(v)
-        if v and v >= 0 then
-            balance = math.max(balance, v)
+    local candidates = {}
+    local function add(v, priority)
+        if v == nil then return end
+        local n = tonumber(v)
+        if n and n >= 0 then table.insert(candidates, {value = n, priority = priority or 0}) end
+    end
+
+    local remotes = {}
+    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
+        if obj:IsA("RemoteFunction") then
+            local n = obj.Name:lower()
+            local p = obj.Parent and obj.Parent.Name:lower() or ""
+            if n:find("balance") or n:find("cash") or n:find("money") or n:find("wallet") or n:find("currency") or p:find("bank") or p:find("economy") or p:find("money") or p:find("currency") then
+                table.insert(remotes, obj)
+            end
         end
     end
-    pcall(function()
-        local containers = {
-            ReplicatedStorage:FindFirstChild("TsumBankRemotes"),
-            ReplicatedStorage:FindFirstChild("ATMRemotes"),
-            ReplicatedStorage:FindFirstChild("ShopRemotes"),
-            ReplicatedStorage:FindFirstChild("Remotes")
-        }
-        for _, folder in ipairs(containers) do
-            if folder then
-                for _, name in ipairs({"GetBalance", "GetCash", "GetMoney", "GetCoins", "GetCurrency", "GetWallet", "Balance", "Cash", "Money"}) do
-                    local obj = folder:FindFirstChild(name)
-                    if obj and obj:IsA("RemoteFunction") then
-                        local ok, res = pcall(function() return obj:InvokeServer() end)
-                        if ok then
-                            if type(res) == "table" then
-                                accept(res.Balance or res.balance or res.Cash or res.cash or res.Money or res.money or res.Coins or res.coins or res.Amount or res.amount)
-                            else
-                                accept(res)
-                            end
-                        end
+
+    for _, r in ipairs(remotes) do
+        local ok, value = pcall(function() return r:InvokeServer() end)
+        if ok then
+            if type(value) == "table" then
+                for _, key in ipairs({"Balance", "balance", "Cash", "cash", "Money", "money", "Currency", "currency", "Wallet", "wallet", "Amount", "amount"}) do
+                    add(value[key], 3)
+                end
+            else
+                add(value, 2)
+            end
+        end
+    end
+
+    for _, key in ipairs({"Balance", "balance", "Cash", "cash", "Money", "money", "Currency", "currency", "Wallet", "wallet", "Coins", "coins"}) do
+        add(LocalPlayer:GetAttribute(key), 3)
+    end
+
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    if ls then
+        for _, v in ipairs(ls:GetChildren()) do
+            local n = v.Name:lower()
+            if n:find("cash") or n:find("money") or n:find("balance") or n:find("coin") or n:find("rub") or n:find("wallet") or n:find("currency") then
+                add(v.Value, 3)
+            end
+        end
+    end
+
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if pg then
+        for _, v in ipairs(pg:GetDescendants()) do
+            if v:IsA("TextLabel") or v:IsA("TextButton") then
+                local n = v.Name:lower()
+                local t = tostring(v.Text or "")
+                local hasCurrency = t:find("₽") or t:find("$") or t:find("€")
+                if hasCurrency then
+                    local parsed = parseMoneyText(t)
+                    if parsed then
+                        local named = n:find("balance") or n:find("money") or n:find("cash") or n:find("wallet") or n:find("currency")
+                        add(parsed, named and 5 or 2)
+                    end
+                elseif n:find("cash") or n:find("money") or n:find("balance") or n:find("wallet") or n:find("currency") then
+                    local parsed = parseMoneyText(t)
+                    if parsed then add(parsed, 2) end
+                end
+            end
+        end
+    end
+
+    for _, container in ipairs({LocalPlayer, pg}) do
+        if container then
+            for _, v in ipairs(container:GetDescendants()) do
+                if v:IsA("IntValue") or v:IsA("NumberValue") then
+                    local n = v.Name:lower()
+                    if n:find("cash") or n:find("money") or n:find("balance") or n:find("coin") or n:find("rub") or n:find("wallet") or n:find("currency") then
+                        add(v.Value, 3)
                     end
                 end
             end
         end
+    end
+
+    table.sort(candidates, function(a, b)
+        if a.priority == b.priority then return a.value > b.value end
+        return a.priority > b.priority
     end)
-    pcall(function()
-        local player = Players.LocalPlayer
-        local containers = {player, player:FindFirstChild("leaderstats"), player:FindFirstChild("Data")}
-        for _, container in ipairs(containers) do
-            if container then
-                for _, name in ipairs({"Balance", "balance", "Cash", "cash", "Money", "money", "Coins", "coins", "Currency", "currency", "Wallet", "wallet"}) do
-                    local obj = container:FindFirstChild(name)
-                    if obj and (obj:IsA("IntValue") or obj:IsA("NumberValue")) then accept(obj.Value) end
-                    local attr = container:GetAttribute(name)
-                    if attr ~= nil then accept(attr) end
-                end
+    return candidates[1] and candidates[1].value or 0
+end
+
+local function ingestShopData(value)
+    local seen = {}
+    local function scan(node, depth)
+        if depth > 5 or seen[node] then return end
+        if type(node) ~= "table" then return end
+        seen[node] = true
+        local ref = node.slotRef or node.slot or node.itemRef or node.mannequin or node.model or node.instance
+        if typeof(ref) == "Instance" then
+            local name = node.name or node.itemName or node.clothingName or node.title
+            local price = node.price or node.Price or node.cost or node.Cost or node.buyPrice or node.BuyPrice
+            local rarity = normalizeRarity(node.rarity or node.Rarity or node.itemRarity or node.ItemRarity)
+            local cat = name and CATALOG[tostring(name):lower()]
+            rarity = rarity or (cat and normalizeRarity(cat.rarity))
+            price = tonumber(price) or (cat and tonumber(cat.fairPrice)) or 0
+            if rarity or name or price > 0 then
+                local old = state.slotData[ref] or {}
+                local man = ref:FindFirstChild("Mannequin", true)
+                state.slotData[ref] = {
+                    name = name or old.name, price = price > 0 and price or old.price or 0,
+                    rarity = rarity or old.rarity, fairPrice = old.fairPrice or (cat and cat.fairPrice) or 0,
+                    profile = old.profile or (cat and cat.profile) or "normal",
+                    profit = old.profit or 0, slotRef = ref,
+                    position = (man and getPos(man)) or getPos(ref) or old.position,
+                }
             end
         end
-    end)
-    return balance
+        for k, v in pairs(node) do
+            if type(v) == "table" then scan(v, depth + 1) end
+        end
+    end
+    if type(value) == "table" then scan(value, 0) end
 end
 
 local sr = ReplicatedStorage:FindFirstChild("ShopRemotes")
 if sr then
     local siu = sr:FindFirstChild("SlotInfoUpdate")
-    if siu then
-        siu.OnClientEvent:Connect(function(arg)
-            if type(arg) ~= "table" or type(arg.slots) ~= "table" then return end
-            for _, slot in ipairs(arg.slots) do
-                if type(slot) == "table" and slot.slotRef and typeof(slot.slotRef) == "Instance" then
-                    local cat = CATALOG[(slot.name or ""):lower()]
-                    local rarity = cat and cat.rarity or slot.rarity
-                    local fairPrice = cat and cat.fairPrice or 0
-                    local profile = cat and cat.profile or "normal"
-                    local bias = PROFILE_BIAS[profile] or 0
-                    local cost = math.floor((slot.price or 0) * (1 + bias))
-                    local bariga = math.floor(fairPrice * 0.98)
-                    local profit = bariga - cost
-                    
-                    local slotPos = getPos(slot.slotRef)
-                    local man = slot.slotRef:FindFirstChild("Mannequin")
-                    local manPos = man and getPos(man)
-                    state.slotData[slot.slotRef] = {
-                        name = slot.name,
-                        price = tonumber(slot.price) or 0,
-                        rarity = rarity,
-                        fairPrice = fairPrice,
-                        profile = profile,
-                        profit = profit,
-                        slotRef = slot.slotRef,
-                        position = manPos or slotPos,
-                    }
-                end
-            end
-        end)
+    if siu and siu:IsA("RemoteEvent") then
+        siu.OnClientEvent:Connect(ingestShopData)
     end
 end
+
+local function hookShopRemote(obj)
+    if not obj:IsA("RemoteEvent") then return end
+    local n = obj.Name:lower()
+    local p = obj.Parent and obj.Parent.Name:lower() or ""
+    if not (n:find("shop") or n:find("slot") or n:find("cloth") or n:find("item") or n:find("stock") or n:find("catalog") or n:find("mannequin") or n:find("product") or n:find("price") or p:find("shop") or p:find("cloth") or p:find("item")) then return end
+    pcall(function() obj.OnClientEvent:Connect(function(...) for i = 1, select("#", ...) do ingestShopData(select(i, ...)) end end) end)
+end
+for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do hookShopRemote(obj) end
+ReplicatedStorage.DescendantAdded:Connect(function(obj) task.defer(function() hookShopRemote(obj) end) end)
 
 local function stopWalk()
     state.walking = false
@@ -248,39 +338,14 @@ local function stopWalk()
     end
 end
 
-local function computePath(fromPos, targetPos)
-    local path = PathfindingService:CreatePath({
-        AgentRadius = 2, AgentHeight = 5, AgentCanJump = true,
-        AgentMaxSlope = 45, WaypointSpacing = 4,
-    })
-    local ok = pcall(function() path:ComputeAsync(fromPos, targetPos) end)
-    if ok and path.Status == Enum.PathStatus.Success then
-        return path:GetWaypoints()
+local function buildPath(hrp, targetPos)
+    local offsets = {Vector3.zero, Vector3.new(8,0,0), Vector3.new(-8,0,0), Vector3.new(0,0,8), Vector3.new(0,0,-8), Vector3.new(6,0,6), Vector3.new(-6,0,6), Vector3.new(6,0,-6), Vector3.new(-6,0,-6)}
+    for _, offset in ipairs(offsets) do
+        local path = PathfindingService:CreatePath({AgentRadius = 2, AgentHeight = 5, AgentCanJump = true, AgentMaxSlope = 45, WaypointSpacing = 4})
+        local ok = pcall(function() path:ComputeAsync(hrp.Position, targetPos + offset) end)
+        if ok and path.Status == Enum.PathStatus.Success then return path:GetWaypoints() end
     end
     return nil
-end
-
-local function buildPath(hrp, targetPos)
-    local direct = computePath(hrp.Position, targetPos)
-    if direct then return direct end
-    local offsets = {
-        Vector3.new(0, 0, 8), Vector3.new(0, 0, -8),
-        Vector3.new(8, 0, 0), Vector3.new(-8, 0, 0),
-        Vector3.new(6, 0, 6), Vector3.new(-6, 0, 6),
-        Vector3.new(6, 0, -6), Vector3.new(-6, 0, -6),
-    }
-    local best, bestDist
-    for _, offset in ipairs(offsets) do
-        local candidate = targetPos + offset
-        local points = computePath(hrp.Position, candidate)
-        if points then
-            local d = (candidate - targetPos).Magnitude
-            if not bestDist or d < bestDist then
-                best, bestDist = points, d
-            end
-        end
-    end
-    return best
 end
 
 local function walkTo(targetPos, onArrive, stopDist)
@@ -314,14 +379,8 @@ local function walkTo(targetPos, onArrive, stopDist)
                 currentHum.Jump = true
             end
             currentHum:MoveTo(wp.Position)
-        elseif (targetPos - currentHrp.Position).Magnitude <= 12 then
+        elseif (targetPos - currentHrp.Position).Magnitude <= 10 then
             currentHum:MoveTo(targetPos)
-        else
-            state.walkRecalc = (state.walkRecalc or 0) + 1
-            if state.walkRecalc <= 3 then
-                state.walkWaypoints = buildPath(currentHrp, targetPos)
-                state.walkWpIndex = 2
-            end
         end
     end
 
@@ -452,53 +511,6 @@ local function closeBariga()
     end)
 end
 
-local function getInventoryFingerprint()
-    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    local inv = pg and (pg:FindFirstChild("Inventory", true) or pg:FindFirstChild("InventoryGui", true))
-    if not inv then return "" end
-    local parts = {}
-    for _, obj in ipairs(inv:GetDescendants()) do
-        if obj:IsA("ImageButton") or obj:IsA("TextButton") or obj:IsA("ImageLabel") then
-            local n = obj.Name
-            local t = obj:IsA("TextButton") and obj.Text or obj:IsA("ImageLabel") and obj.Image or ""
-            if n ~= "" or t ~= "" then
-                parts[#parts + 1] = n .. "=" .. t
-            end
-        end
-    end
-    table.sort(parts)
-    return table.concat(parts, "|")
-end
-
-local function waitForInventoryChange(before, timeout)
-    local started = tick()
-    while tick() - started < (timeout or 8) do
-        local now = getInventoryFingerprint()
-        if now ~= "" and now ~= before then return true end
-        task.wait(0.25)
-    end
-    return false
-end
-
-local function waitForSellableInventory(timeout)
-    local started = tick()
-    while tick() - started < (timeout or 8) do
-        local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-        local inv = pg and (pg:FindFirstChild("Inventory", true) or pg:FindFirstChild("InventoryGui", true))
-        if inv then
-            local count = 0
-            for _, obj in ipairs(inv:GetDescendants()) do
-                if obj:IsA("ImageButton") or obj:IsA("TextButton") then
-                    if obj.Visible then count += 1 end
-                end
-            end
-            if count > 0 then return true end
-        end
-        task.wait(0.25)
-    end
-    return false
-end
-
 local function sellAllToBariga(onDone)
     local br = ReplicatedStorage:FindFirstChild("BarigaRemotes")
     if not br then
@@ -514,10 +526,9 @@ local function sellAllToBariga(onDone)
         return
     end
 
-    local inventoryBefore = getInventoryFingerprint()
     pcall(function() fireproximityprompt(prompt) end)
 
-    task.wait(1.5)
+    task.wait(2)
     local pg = LocalPlayer:WaitForChild("PlayerGui")
     local rGui = pg:FindFirstChild("BarigaResponseGui")
     if not rGui then
@@ -530,9 +541,7 @@ local function sellAllToBariga(onDone)
     local r1 = responses and responses:FindFirstChild("Response1")
     if r1 then clickGuiButton(r1) end
 
-    task.wait(1.5)
-    waitForSellableInventory(5)
-    waitForInventoryChange(inventoryBefore, 5)
+    task.wait(2)
     local barigaUI = pg:FindFirstChild("BarigaUI")
     if not barigaUI then
         closeBariga()
@@ -540,7 +549,7 @@ local function sellAllToBariga(onDone)
         return
     end
 
-    task.wait(1)
+    task.wait(3)
 
     local seller = barigaUI:FindFirstChild("Seller")
     if seller then
@@ -551,7 +560,7 @@ local function sellAllToBariga(onDone)
         end
     end
 
-    task.wait(1.5)
+    task.wait(2)
 
     local prompt2 = barigaUI:FindFirstChild("SellingPrompt")
     if prompt2 then
@@ -583,66 +592,133 @@ local function getItemDetector(ref)
     return torso:FindFirstChild("ClickDetector")
 end
 
-local function buyItemsList(itemsList, onDone)
-    if #itemsList == 0 then 
-        Notify("Buy", "Список пуст", "Error", nil, 3)
-        if onDone then onDone() end
-        return 
-    end
-    
-    Notify("Buy", "Покупаем " .. #itemsList .. " предметов", "Info", nil, 2)
-    
-    local bestSeller, bestDist = nil, math.huge
-    local _, hrp = getChar()
-    if not hrp then return end
-    
-    for _, seller in ipairs(ws:GetDescendants()) do
-        if seller.Name == "Seller" and seller:IsA("Model") then
-            local shrp = seller:FindFirstChild("HumanoidRootPart")
-            if shrp then
-                local d = (shrp.Position - hrp.Position).Magnitude
-                if d < bestDist then
-                    bestDist = d
-                    bestSeller = { pos = shrp.Position, cd = shrp:FindFirstChild("ClickDetector") }
-                end
+local function readBalanceStable()
+    local last = nil
+    local same = 0
+    for _ = 1, 8 do
+        local value = getBalance()
+        if value and value > 0 then
+            if last == value then
+                same = same + 1
+                if same >= 2 then return value end
+            else
+                last = value
+                same = 0
             end
         end
+        task.wait(0.35)
     end
-    
-    if not bestSeller then 
-        Notify("Buy", "Продавец не найден", "Error", nil, 3)
-        return 
+    return last or 0
+end
+
+local function waitForBalanceDrop(before, expected)
+    local deadline = tick() + 10
+    local required = math.max(1, math.floor(expected * 0.98))
+    local after = before
+    while tick() < deadline do
+        task.wait(0.5)
+        after = getBalance()
+        if after > 0 and before - after >= required then
+            return true, after
+        end
     end
-    
-    local idx = 1
-    local function nextItem()
-        if idx > #itemsList then
-            walkTo(bestSeller.pos, function()
-                if bestSeller.cd then clickDetector(bestSeller.cd) end
-                task.wait(1)
-                local shopRemotes = ReplicatedStorage:FindFirstChild("ShopRemotes")
-                if shopRemotes then
-                    local cp = shopRemotes:FindFirstChild("ConfirmPurchase")
-                    if cp then pcall(function() cp:FireServer() end) end
-                end
-                task.wait(3)
-                waitForSellableInventory(6)
-                task.wait(2)
-                if onDone then onDone() end
-            end, 10)
+    return false, after
+end
+
+local function buyItemsList(itemsList, onDone)
+    if #itemsList == 0 then
+        Notify("Buy", "Список пуст", "Error", nil, 3)
+        if onDone then onDone() end
+        return
+    end
+
+    local groups = {}
+    local order = {}
+    for _, item in ipairs(itemsList) do
+        local price = tonumber(item.data and item.data.price) or 0
+        local shop, seller, sellerRoot = getItemShop(item.ref)
+        if price > 0 and shop and sellerRoot then
+            local group = groups[shop]
+            if not group then
+                group = {shop = shop, seller = seller, sellerRoot = sellerRoot, items = {}}
+                groups[shop] = group
+                table.insert(order, group)
+            end
+            table.insert(group.items, item)
+        end
+    end
+
+    if #order == 0 then
+        Notify("Buy", "Не удалось определить магазины и цены", "Error", nil, 4)
+        return
+    end
+
+    local groupIndex = 1
+    local function nextGroup()
+        if groupIndex > #order then
+            if onDone then onDone() end
             return
         end
-        
-        local item = itemsList[idx]
-        idx = idx + 1
-        walkTo(item.pos, function()
-            if item.detector then clickDetector(item.detector) end
-            task.wait(0.5)
-            nextItem()
-        end, 10)
+
+        local group = order[groupIndex]
+        groupIndex = groupIndex + 1
+        local expected = 0
+        for _, item in ipairs(group.items) do expected = expected + (tonumber(item.data.price) or 0) end
+
+        local balance = readBalanceStable()
+        if balance <= 0 then
+            Notify("Buy", "Не удалось надежно определить баланс", "Error", nil, 4)
+            return
+        end
+        if balance < expected then
+            Notify("Buy", "Недостаточно баланса: нужно " .. math.floor(expected) .. ", доступно " .. math.floor(balance), "Error", nil, 4)
+            nextGroup()
+            return
+        end
+
+        Notify("Buy", "Магазин: " .. #group.items .. " предметов | " .. math.floor(expected) .. " ₽", "Info", nil, 3)
+        local idx = 1
+        local function nextItem()
+            if idx > #group.items then
+                walkTo(group.sellerRoot.Position, function()
+                    if group.seller then
+                        local cd = group.seller:FindFirstChild("ClickDetector", true)
+                        if cd then clickDetector(cd) end
+                    end
+                    task.wait(1)
+                    local shopRemotes = ReplicatedStorage:FindFirstChild("ShopRemotes")
+                    local cp = shopRemotes and shopRemotes:FindFirstChild("ConfirmPurchase")
+                    local before = getBalance()
+                    if before <= 0 then before = balance end
+                    if not cp or not cp:IsA("RemoteEvent") then
+                        Notify("Buy", "ConfirmPurchase не найден", "Error", nil, 4)
+                        return
+                    end
+                    pcall(function() cp:FireServer() end)
+                    local paid, after = waitForBalanceDrop(before, expected)
+                    if not paid then
+                        Notify("Buy", "Оплата корзины не подтверждена: было " .. math.floor(before) .. ", стало " .. math.floor(after or 0) .. ", ожидалось " .. math.floor(expected), "Error", nil, 6)
+                        return
+                    end
+                    Notify("Buy", "Оплачено: " .. math.floor(expected) .. " ₽ | остаток " .. math.floor(after), "Success", nil, 3)
+                    task.wait(1)
+                    nextGroup()
+                end, 10)
+                return
+            end
+
+            local item = group.items[idx]
+            idx = idx + 1
+            walkTo(item.pos, function()
+                if item.detector then clickDetector(item.detector) end
+                task.wait(0.7)
+                nextItem()
+            end, 10)
+        end
+        nextItem()
     end
-    
-    nextItem()
+
+    nextGroup()
 end
 
 local function clearTable(t)
@@ -672,57 +748,32 @@ end
 
 local function makeChamsProxy(pos, color)
     if not pos then return nil end
-    local ok, part = pcall(function()
+    local ok, part, hl = pcall(function()
         local p = Instance.new("Part")
         p.Name = "HirukuChamsProxy"
-        p.Size = Vector3.new(2.5, 5, 1.5)
+        p.Size = Vector3.new(3, 5, 3)
         p.CFrame = CFrame.new(pos)
         p.Anchored = true
         p.CanCollide = false
         p.CanTouch = false
         p.CanQuery = false
-        p.Transparency = 1
+        p.Transparency = 0.82
+        p.Material = Enum.Material.ForceField
+        p.Color = color
         p.Parent = workspace
-        return p
+        local h = Instance.new("Highlight")
+        h.Name = "HirukuProxyHL"
+        h.Adornee = p
+        h.FillColor = color
+        h.OutlineColor = color
+        h.FillTransparency = 0.25
+        h.OutlineTransparency = 0
+        h.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+        h.Parent = p
+        return p, h
     end)
-    if not ok then return nil end
-    local hl = makeHL(part, color, 0.5)
-    if not hl then pcall(function() part:Destroy() end) return nil end
-    return { part = part, highlight = hl }
-end
-
-local function getRarityFromObject(obj)
-    if not obj then return nil end
-    local names = {"Rarity", "rarity", "ItemRarity", "ItemType"}
-    local cur = obj
-    for _ = 1, 4 do
-        if not cur then break end
-        for _, n in ipairs(names) do
-            local a = cur:GetAttribute(n)
-            if a ~= nil then return tostring(a) end
-            local v = cur:FindFirstChild(n)
-            if v and v:IsA("StringValue") then return v.Value end
-        end
-        cur = cur.Parent
-    end
-    local itemName = obj:GetAttribute("ItemName") or obj:GetAttribute("itemName") or obj:GetAttribute("Name")
-    if itemName then
-        local cat = CATALOG[tostring(itemName):lower()]
-        if cat then return cat.rarity end
-    end
+    if ok then return part, hl end
     return nil
-end
-
-local function getLiveMannequins()
-    local result = {}
-    pcall(function()
-        for _, obj in ipairs(workspace:GetDescendants()) do
-            if obj:IsA("Model") and obj.Name == "Mannequin" then
-                result[#result + 1] = obj
-            end
-        end
-    end)
-    return result
 end
 
 local function countSlotsByRarity()
@@ -734,59 +785,85 @@ local function countSlotsByRarity()
     return counts
 end
 
-local function updateChams()
-    if not state.chams then return 0 end
-    local color = RARITY_COLORS[state.chamsRarity] or Color3.fromRGB(255, 180, 30)
-    local live = {}
-    local cnt = 0
-
+local function getLiveMannequins()
+    local result = {}
+    local seen = {}
+    for _, obj in ipairs(ws:GetDescendants()) do
+        if obj.Name == "Mannequin" and (obj:IsA("Model") or obj:IsA("BasePart")) then
+            local ref = obj.Parent
+            local cached = ref and state.slotData[ref]
+            local rarity = cached and cached.rarity
+            local name = cached and cached.name
+            local price = cached and cached.price
+            if not rarity then rarity = normalizeRarity(obj:GetAttribute("Rarity") or obj:GetAttribute("rarity")) end
+            name = name or obj:GetAttribute("ItemName") or obj:GetAttribute("Name")
+            price = price or obj:GetAttribute("Price") or obj:GetAttribute("price")
+            if not rarity and name then
+                local cat = CATALOG[tostring(name):lower()]
+                rarity = cat and normalizeRarity(cat.rarity)
+                price = price or (cat and cat.fairPrice)
+            end
+            if not rarity then
+                local text = obj:GetAttribute("ItemType") or obj:GetAttribute("Type")
+                rarity = normalizeRarity(text)
+            end
+            if rarity and not seen[obj] then
+                seen[obj] = true
+                local shop = getItemShop(ref)
+                local livePrice = tonumber(price) or 0
+                local fair = cached and cached.fairPrice or 0
+                local profit = cached and cached.profit or 0
+                if livePrice > 0 and fair > 0 then profit = math.floor(fair * 0.98 - livePrice) end
+                result[#result + 1] = {mannequin = obj, ref = ref, rarity = rarity, name = name, price = livePrice, profit = profit, data = cached, shop = shop}
+            end
+        end
+    end
     for ref, data in pairs(state.slotData) do
-        if ref and ref.Parent then
-            local man = getItemMannequin(ref)
-            local pos = man and getPos(man) or data.position or getPos(ref)
-            if man and man.Parent then
-                data.position = pos or data.position
-                local entry = state.chamsHighlights[ref]
-                if entry and entry:IsA("Highlight") then
-                    entry.Adornee = man
-                elseif entry and entry.highlight then
-                    entry.highlight.Adornee = man
-                else
-                    entry = makeHL(man, color, 0.4)
-                    state.chamsHighlights[ref] = entry
-                end
-                if data.rarity == state.chamsRarity then
-                    live[man] = true
-                    cnt += 1
-                end
-            elseif data.rarity == state.chamsRarity and data.position then
-                local entry = state.chamsProxies[ref]
-                if not entry or not entry.part or not entry.part.Parent then
-                    entry = makeChamsProxy(data.position, color)
-                    state.chamsProxies[ref] = entry
-                elseif entry.part then
-                    entry.part.CFrame = CFrame.new(data.position)
-                end
-                if entry then cnt += 1 end
+        local man = getItemMannequin(ref)
+        if man and man.Parent and not seen[man] then
+            seen[man] = true
+            result[#result + 1] = {mannequin = man, ref = ref, rarity = normalizeRarity(data.rarity), name = data.name, price = tonumber(data.price) or 0, profit = data.profit or 0, data = data, shop = getItemShop(ref)}
+        end
+    end
+    return result
+end
+
+local function updateChams()
+    clearTable(state.chamsHighlights)
+    for key, proxy in pairs(state.chamsProxies) do
+        pcall(function() proxy:Destroy() end)
+        state.chamsProxies[key] = nil
+    end
+    if not state.chams then return end
+    local cnt = 0
+    local liveRefs = {}
+    for _, item in ipairs(getLiveMannequins()) do
+        local rarity = normalizeRarity(item.rarity)
+        local selected = state.chamsRarity == "All" or normalizeRarity(state.chamsRarity) == rarity
+        if selected and item.mannequin.Parent then
+            liveRefs[item.ref] = true
+            local color = RARITY_COLORS[rarity] or Color3.fromRGB(255,255,255)
+            local hl = makeHL(item.mannequin, color, 0.4)
+            if hl then
+                state.chamsHighlights[item.mannequin] = hl
+                cnt = cnt + 1
             end
         end
     end
-
-    for _, man in ipairs(getLiveMannequins()) do
-        if not live[man] then
-            local rarity = getRarityFromObject(man)
-            if rarity == state.chamsRarity then
-                local hl = makeHL(man, color, 0.4)
-                if hl then
-                    local key = man
-                    state.chamsHighlights[key] = hl
-                    live[man] = true
-                    cnt += 1
+    for ref, data in pairs(state.slotData) do
+        if not liveRefs[ref] and data.position and data.rarity then
+            local rarity = normalizeRarity(data.rarity)
+            local selected = state.chamsRarity == "All" or normalizeRarity(state.chamsRarity) == rarity
+            if selected then
+                local color = RARITY_COLORS[rarity] or Color3.fromRGB(255,255,255)
+                local proxy = makeChamsProxy(data.position, color)
+                if proxy then
+                    state.chamsProxies[ref] = proxy
+                    cnt = cnt + 1
                 end
             end
         end
     end
-
     return cnt
 end
 
@@ -810,7 +887,7 @@ local function startChams()
     
     state.chamsTask = task.spawn(function()
         while state.chams do
-            task.wait(3)
+            task.wait(1)
             if state.chams then updateChams() end
         end
     end)
@@ -820,12 +897,9 @@ local function stopChams()
     state.chams = false
     if state.chamsTask then pcall(function() task.cancel(state.chamsTask) end) end
     clearTable(state.chamsHighlights)
-    for k, entry in pairs(state.chamsProxies) do
-        if entry then
-            if entry.highlight then pcall(function() entry.highlight:Destroy() end) end
-            if entry.part then pcall(function() entry.part:Destroy() end) end
-        end
-        state.chamsProxies[k] = nil
+    for key, proxy in pairs(state.chamsProxies) do
+        pcall(function() proxy:Destroy() end)
+        state.chamsProxies[key] = nil
     end
     Notify("Chams", "Выключен", "Info", nil, 2)
 end
@@ -911,26 +985,20 @@ end
 
 local function getMannequinsByRarity(rarity)
     local list = {}
-    local seen = {}
-    for ref, data in pairs(state.slotData) do
-        local man = getItemMannequin(ref)
-        if data.rarity == rarity and ref.Parent and man and man.Parent then
+    for _, item in ipairs(getLiveMannequins()) do
+        local man = item.mannequin
+        local ref = item.ref
+        if normalizeRarity(item.rarity) == normalizeRarity(rarity) and man and man.Parent and (tonumber(item.price) or 0) > 0 then
             local pos = getPos(man)
-            local cd = getItemDetector(ref)
+            local cd = ref and getItemDetector(ref)
             if pos and cd then
-                seen[man] = true
-                data.position = pos
-                table.insert(list, { pos = pos, detector = cd, data = data, ref = ref, mannequin = man })
-            end
-        end
-    end
-    for _, man in ipairs(getLiveMannequins()) do
-        if not seen[man] and getRarityFromObject(man) == rarity then
-            local ref = man.Parent
-            local pos = getPos(man)
-            local cd = man:FindFirstChild("Torso") and man.Torso:FindFirstChild("ClickDetector")
-            if pos and cd then
-                local data = state.slotData[ref] or {name = man:GetAttribute("ItemName") or man.Name, price = 0, rarity = rarity, fairPrice = 0, profit = 0, position = pos}
+                local data = item.data or {
+                    name = item.name,
+                    price = item.price,
+                    rarity = item.rarity,
+                    profit = item.profit,
+                    slotRef = ref,
+                }
                 table.insert(list, { pos = pos, detector = cd, data = data, ref = ref, mannequin = man })
             end
         end
@@ -940,12 +1008,20 @@ end
 
 local function getAllItems()
     local list = {}
-    for ref, data in pairs(state.slotData) do
-        local man = getItemMannequin(ref)
-        if ref.Parent and man and man.Parent and data.profit and data.profit > 0 then
+    for _, item in ipairs(getLiveMannequins()) do
+        local man = item.mannequin
+        local ref = item.ref
+        if man and man.Parent and (item.profit or 0) > 0 and (tonumber(item.price) or 0) > 0 then
             local pos = getPos(man)
-            local cd = getItemDetector(ref)
+            local cd = ref and getItemDetector(ref)
             if pos and cd then
+                local data = item.data or {
+                    name = item.name,
+                    price = item.price,
+                    rarity = item.rarity,
+                    profit = item.profit,
+                    slotRef = ref,
+                }
                 table.insert(list, { pos = pos, detector = cd, data = data, ref = ref, mannequin = man })
             end
         end
@@ -970,7 +1046,7 @@ local function autoBuyLoop()
                 if r == state.autoBuyRarity then has = true break end
             end
             if not has then
-                Notify("Auto Buy", "Нет " .. state.autoBuyRarity .. " в кэше", "Error", nil, 3)
+                Notify("Auto Buy", "Нет доступных " .. state.autoBuyRarity, "Error", nil, 3)
                 task.wait(3)
             end
             continue 
@@ -1032,7 +1108,7 @@ local function fullSellLoop()
         local targets = getAllItems()
         
         if #targets == 0 then
-            Notify("Full-Sell", "Нет прибыльных в кэше", "Info", nil, 2)
+            Notify("Full-Sell", "Нет доступных прибыльных предметов", "Info", nil, 2)
             task.wait(3)
             continue 
         end
@@ -1171,7 +1247,7 @@ secHB:AddToggle("HBToggle", {
 
 local secCH = Tabs.Chams:AddSection("Chams", "solar/eye-bold")
 secCH:AddDropdown("CHRarity", {
-    Title = "Редкость", Icon = "solar/star-bold", Values = RARITY_LIST, Default = "Legendary", Multi = false,
+    Title = "Редкость", Icon = "solar/star-bold", Values = RARITY_LIST, Default = "All", Multi = false,
     Callback = function(v)
         if type(v) == "table" then for k in pairs(v) do state.chamsRarity = k break end
         else state.chamsRarity = v end
