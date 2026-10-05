@@ -7,12 +7,59 @@ if not Fluent then return warn("[Hiruku] Fluent не загрузился") end
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local LogService = game:GetService("LogService")
+local ScriptContext = game:GetService("ScriptContext")
+local CollectionService = game:GetService("CollectionService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local PathfindingService = game:GetService("PathfindingService")
 local LocalPlayer = Players:GetPlayers()[1]
 local Camera = workspace.CurrentCamera
 local ws = workspace
 pcall(function() ws.StreamingTargetRadius = math.max(ws.StreamingTargetRadius, 100000) end)
+
+local DEBUG_LOG = true
+local function HLog(level, message, ...)
+    if not DEBUG_LOG then return end
+    local suffix = ""
+    local ok, packed = pcall(function() return {...} end)
+    if ok and #packed > 0 then
+        local parts = {}
+        for i, v in ipairs(packed) do parts[i] = tostring(v) end
+        suffix = " | " .. table.concat(parts, " | ")
+    end
+    local line = "[Hiruku][" .. tostring(level) .. "] " .. tostring(message) .. suffix
+    pcall(function()
+        if level == "ERROR" and type(rconsoleerr) == "function" then rconsoleerr(line .. "\n")
+        elseif type(rconsoleprint) == "function" then rconsoleprint(line .. "\n") end
+    end)
+    if level == "ERROR" then warn(line) else print(line) end
+end
+
+pcall(function()
+    LogService.MessageOut:Connect(function(message, messageType)
+        local mt = tostring(messageType)
+        if mt:find("Error") or mt:find("MessageError") then
+            HLog("ENGINE_ERROR", message)
+        end
+    end)
+end)
+
+pcall(function()
+    ScriptContext.Error:Connect(function(message, trace, script)
+        HLog("SCRIPT_ERROR", message, script and script:GetFullName() or "<unknown>")
+        if trace and trace ~= "" then warn("[Hiruku][TRACE] " .. tostring(trace)) end
+    end)
+end)
+
+local function Safe(label, fn, ...)
+    local args = {...}
+    local ok, a, b, c, d = xpcall(function() return fn(table.unpack(args)) end, debug.traceback)
+    if not ok then
+        HLog("ERROR", label, a)
+        return false, a
+    end
+    return true, a, b, c, d
+end
 
 local function Notify(t, c, ty, i, d)
     pcall(function() Fluent:Notify({ Title = t, Content = c, Type = ty or "Info", Icon = i, Duration = d or 3 }) end)
@@ -85,16 +132,15 @@ end
 
 local function parseMoneyText(v)
     if v == nil then return nil end
-    local s = tostring(v)
-    local raw = s:match("([%d][%d%.,%s]*)%s*[₽$€₽]") or s:match("[₽$€]%s*([%d][%d%.,%s]*)")
-    if not raw then raw = s:match("(%d[%d%.,%s]*)") end
+    local s = tostring(v):gsub("%s", "")
+    local raw = s:match("([%d][%d%.,]*)[₽$€]") or s:match("[₽$€]([%d][%d%.,]*)") or s:match("(%d[%d%.,]*)")
     if not raw then return nil end
-    raw = raw:gsub("%s", ""):gsub("%.", ""):gsub(",", ".")
-    local n = tonumber(raw)
+    local digits = raw:gsub("[^%d]", "")
+    if digits == "" then return nil end
+    local n = tonumber(digits)
     if n and n >= 0 then return n end
     return nil
 end
-
 local function getItemShop(ref)
     local obj = ref
     while obj and obj ~= ws do
@@ -158,6 +204,7 @@ local state = {
     fullSell = false, fullSellTask = nil,
     walkSpeed = 30,
     slotData = {},
+    remoteRecords = {}, balanceSource = nil, balanceLast = 0, balanceLastSource = "",
     walking = false, walkConn = nil, walkWaypoints = nil, walkWpIndex = 1,
     walkTarget = nil, walkStuck = 0, walkLastPos = nil, walkStart = 0,
 }
@@ -191,89 +238,85 @@ end
 
 local function getBalance()
     local candidates = {}
-    local function add(v, priority)
-        if v == nil then return end
-        local n = tonumber(v)
-        if n and n >= 0 then table.insert(candidates, {value = n, priority = priority or 0}) end
+    local function add(value, score, source)
+        local n = tonumber(value)
+        if n and n >= 0 then candidates[#candidates + 1] = {value=n, score=score, source=source} end
     end
-
-    local remotes = {}
-    for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
-        if obj:IsA("RemoteFunction") then
-            local n = obj.Name:lower()
-            local p = obj.Parent and obj.Parent.Name:lower() or ""
-            if n:find("balance") or n:find("cash") or n:find("money") or n:find("wallet") or n:find("currency") or p:find("bank") or p:find("economy") or p:find("money") or p:find("currency") then
-                table.insert(remotes, obj)
-            end
-        end
-    end
-
-    for _, r in ipairs(remotes) do
-        local ok, value = pcall(function() return r:InvokeServer() end)
-        if ok then
-            if type(value) == "table" then
-                for _, key in ipairs({"Balance", "balance", "Cash", "cash", "Money", "money", "Currency", "currency", "Wallet", "wallet", "Amount", "amount"}) do
-                    add(value[key], 3)
-                end
-            else
-                add(value, 2)
-            end
-        end
-    end
-
-    for _, key in ipairs({"Balance", "balance", "Cash", "cash", "Money", "money", "Currency", "currency", "Wallet", "wallet", "Coins", "coins"}) do
-        add(LocalPlayer:GetAttribute(key), 3)
-    end
-
-    local ls = LocalPlayer:FindFirstChild("leaderstats")
-    if ls then
-        for _, v in ipairs(ls:GetChildren()) do
-            local n = v.Name:lower()
-            if n:find("cash") or n:find("money") or n:find("balance") or n:find("coin") or n:find("rub") or n:find("wallet") or n:find("currency") then
-                add(v.Value, 3)
-            end
-        end
-    end
-
     local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if pg then
         for _, v in ipairs(pg:GetDescendants()) do
             if v:IsA("TextLabel") or v:IsA("TextButton") then
-                local n = v.Name:lower()
                 local t = tostring(v.Text or "")
-                local hasCurrency = t:find("₽") or t:find("$") or t:find("€")
-                if hasCurrency then
-                    local parsed = parseMoneyText(t)
-                    if parsed then
-                        local named = n:find("balance") or n:find("money") or n:find("cash") or n:find("wallet") or n:find("currency")
-                        add(parsed, named and 5 or 2)
-                    end
-                elseif n:find("cash") or n:find("money") or n:find("balance") or n:find("wallet") or n:find("currency") then
-                    local parsed = parseMoneyText(t)
-                    if parsed then add(parsed, 2) end
+                local n = parseMoneyText(t)
+                if n ~= nil then
+                    local name = v.Name:lower()
+                    local parentName = v.Parent and v.Parent.Name:lower() or ""
+                    local score = 5
+                    if t:find("₽") then score = 10 end
+                    if name:find("balance") or name:find("money") or name:find("cash") or name:find("wallet") then score = score + 5 end
+                    if parentName:find("balance") or parentName:find("money") or parentName:find("cash") or parentName:find("wallet") then score = score + 3 end
+                    add(n, score, v:GetFullName())
                 end
             end
         end
     end
-
-    for _, container in ipairs({LocalPlayer, pg}) do
-        if container then
-            for _, v in ipairs(container:GetDescendants()) do
-                if v:IsA("IntValue") or v:IsA("NumberValue") then
-                    local n = v.Name:lower()
-                    if n:find("cash") or n:find("money") or n:find("balance") or n:find("coin") or n:find("rub") or n:find("wallet") or n:find("currency") then
-                        add(v.Value, 3)
-                    end
+    local ls = LocalPlayer:FindFirstChild("leaderstats")
+    if ls then
+        for _, v in ipairs(ls:GetChildren()) do
+            if v:IsA("IntValue") or v:IsA("NumberValue") then
+                local n = v.Name:lower()
+                if n:find("cash") or n:find("money") or n:find("balance") or n:find("rub") or n:find("wallet") then
+                    add(v.Value, 7, v:GetFullName())
                 end
             end
         end
     end
-
-    table.sort(candidates, function(a, b)
-        if a.priority == b.priority then return a.value > b.value end
-        return a.priority > b.priority
+    for _, key in ipairs({"Balance","balance","Cash","cash","Money","money","Wallet","wallet","Currency","currency"}) do
+        add(LocalPlayer:GetAttribute(key), 6, "Attribute:" .. key)
+    end
+    if #candidates == 0 and pg then
+        for _, v in ipairs(pg:GetDescendants()) do
+            if v:IsA("IntValue") or v:IsA("NumberValue") then
+                local n = v.Name:lower()
+                if n:find("cash") or n:find("money") or n:find("balance") or n:find("rub") or n:find("wallet") then
+                    add(v.Value, 4, v:GetFullName())
+                end
+            end
+        end
+    end
+    table.sort(candidates, function(a,b)
+        if a.score == b.score then
+            if a.source == state.balanceLastSource then return true end
+            return a.value == state.balanceLast
+        end
+        return a.score > b.score
     end)
-    return candidates[1] and candidates[1].value or 0
+    local best = candidates[1]
+    if best then
+        state.balanceLast = best.value
+        state.balanceLastSource = best.source
+        state.balanceSource = best.source
+        return best.value
+    end
+    return 0
+end
+local function ingestRemoteRecord(value, depth, sourceName)
+    if depth > 7 or type(value) ~= "table" then return end
+    local name = value.name or value.itemName or value.clothingName or value.title or value.Name
+    local rarity = normalizeRarity(value.rarity or value.Rarity or value.itemRarity or value.ItemRarity or value.ItemType)
+    local price = tonumber(value.price or value.Price or value.cost or value.Cost or value.buyPrice or value.BuyPrice)
+    local fair = tonumber(value.fairPrice or value.FairPrice or value.value or value.Value or value.sellPrice or value.SellPrice)
+    local pos = value.position or value.Position or value.location or value.Location or value.worldPosition
+    if typeof(pos) ~= "Vector3" then
+        if type(pos) == "table" and pos.X and pos.Y and pos.Z then pos = Vector3.new(pos.X,pos.Y,pos.Z) end
+    end
+    if name or rarity or price or fair or typeof(pos) == "Vector3" then
+        local key = tostring(name or "?") .. "|" .. tostring(rarity or "?") .. "|" .. tostring(pos or "?")
+        state.remoteRecords[key] = {name=name, rarity=rarity, price=price or 0, fairPrice=fair or 0, position=pos, source=sourceName, updated=tick()}
+    end
+    for _, child in pairs(value) do
+        if type(child) == "table" then ingestRemoteRecord(child, depth + 1, sourceName) end
+    end
 end
 
 local function ingestShopData(value)
@@ -297,7 +340,7 @@ local function ingestShopData(value)
                     name = name or old.name, price = price > 0 and price or old.price or 0,
                     rarity = rarity or old.rarity, fairPrice = old.fairPrice or (cat and cat.fairPrice) or 0,
                     profile = old.profile or (cat and cat.profile) or "normal",
-                    profit = old.profit or 0, slotRef = ref,
+                    profit = (price > 0 and (tonumber(old.fairPrice or (cat and cat.fairPrice) or 0) or 0) > 0) and math.max(0, math.floor((tonumber(old.fairPrice or (cat and cat.fairPrice) or 0) or 0) * 0.98 - price)) or old.profit or 0, slotRef = ref,
                     position = (man and getPos(man)) or getPos(ref) or old.position,
                 }
             end
@@ -322,7 +365,7 @@ local function hookShopRemote(obj)
     local n = obj.Name:lower()
     local p = obj.Parent and obj.Parent.Name:lower() or ""
     if not (n:find("shop") or n:find("slot") or n:find("cloth") or n:find("item") or n:find("stock") or n:find("catalog") or n:find("mannequin") or n:find("product") or n:find("price") or p:find("shop") or p:find("cloth") or p:find("item")) then return end
-    pcall(function() obj.OnClientEvent:Connect(function(...) for i = 1, select("#", ...) do ingestShopData(select(i, ...)) end end) end)
+    pcall(function() obj.OnClientEvent:Connect(function(...) for i = 1, select("#", ...) do local v=select(i,...); ingestShopData(v); ingestRemoteRecord(v,0,obj:GetFullName()) end end) end)
 end
 for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do hookShopRemote(obj) end
 ReplicatedStorage.DescendantAdded:Connect(function(obj) task.defer(function() hookShopRemote(obj) end) end)
@@ -625,102 +668,93 @@ local function waitForBalanceDrop(before, expected)
     return false, after
 end
 
-local function buyItemsList(itemsList, onDone)
-    if #itemsList == 0 then
-        Notify("Buy", "Список пуст", "Error", nil, 3)
-        if onDone then onDone() end
-        return
-    end
+local function pointInsideZone(zone, pos)
+    if not zone or not pos then return false end
+    local ok, cf, size = pcall(function() return zone:GetBoundingBox() end)
+    if not ok then return true end
+    local localPos = cf:PointToObjectSpace(pos)
+    return math.abs(localPos.X) <= size.X/2 + 8 and math.abs(localPos.Y) <= size.Y/2 + 12 and math.abs(localPos.Z) <= size.Z/2 + 8
+end
 
-    local groups = {}
-    local order = {}
+local function buyItemsList(itemsList, onDone)
+    if #itemsList == 0 then Notify("Buy", "Список пуст", "Error", nil, 3); if onDone then onDone(false) end; return end
+    local groups, order = {}, {}
     for _, item in ipairs(itemsList) do
         local price = tonumber(item.data and item.data.price) or 0
         local shop, seller, sellerRoot = getItemShop(item.ref)
-        if price > 0 and shop and sellerRoot then
+        if price > 0 and shop then
             local group = groups[shop]
-            if not group then
-                group = {shop = shop, seller = seller, sellerRoot = sellerRoot, items = {}}
-                groups[shop] = group
-                table.insert(order, group)
-            end
-            table.insert(group.items, item)
+            if not group then group={shop=shop,seller=seller,sellerRoot=sellerRoot,items={}}; groups[shop]=group; order[#order+1]=group end
+            group.items[#group.items+1]=item
         end
     end
-
-    if #order == 0 then
-        Notify("Buy", "Не удалось определить магазины и цены", "Error", nil, 4)
-        return
-    end
-
-    local groupIndex = 1
+    if #order == 0 then Notify("Buy", "Не удалось определить ShopZone", "Error", nil, 4); if onDone then onDone(false) end; return end
+    local gi=1
     local function nextGroup()
-        if groupIndex > #order then
-            if onDone then onDone() end
-            return
+        if gi>#order then if onDone then onDone(true) end; return end
+        local group=order[gi]; gi+=1
+        local expected=0
+        for _,item in ipairs(group.items) do expected += tonumber(item.data.price) or 0 end
+        local balance=readBalanceStable()
+        if balance<=0 or balance<expected then
+            Notify("Buy", balance<=0 and "Баланс не определён" or ("Недостаточно: "..math.floor(balance).." ₽ / нужно "..math.floor(expected).." ₽"), "Error", nil, 5)
+            nextGroup(); return
         end
-
-        local group = order[groupIndex]
-        groupIndex = groupIndex + 1
-        local expected = 0
-        for _, item in ipairs(group.items) do expected = expected + (tonumber(item.data.price) or 0) end
-
-        local balance = readBalanceStable()
-        if balance <= 0 then
-            Notify("Buy", "Не удалось надежно определить баланс", "Error", nil, 4)
-            return
+        local _, hrp= getChar()
+        if not hrp then return end
+        local zoneCF,zoneSize=group.shop:GetBoundingBox()
+        local zoneCenter=zoneCF.Position
+        local function ensureInside(cb)
+            local _, r=getChar()
+            if r and pointInsideZone(group.shop,r.Position) then cb(); return end
+            walkTo(zoneCenter, cb, 6)
         end
-        if balance < expected then
-            Notify("Buy", "Недостаточно баланса: нужно " .. math.floor(expected) .. ", доступно " .. math.floor(balance), "Error", nil, 4)
-            nextGroup()
-            return
-        end
-
-        Notify("Buy", "Магазин: " .. #group.items .. " предметов | " .. math.floor(expected) .. " ₽", "Info", nil, 3)
-        local idx = 1
+        local idx=1
         local function nextItem()
-            if idx > #group.items then
-                walkTo(group.sellerRoot.Position, function()
-                    if group.seller then
-                        local cd = group.seller:FindFirstChild("ClickDetector", true)
+            if idx>#group.items then
+                ensureInside(function()
+                    local _,r=getChar()
+                    if not r or not pointInsideZone(group.shop,r.Position) then Notify("Buy","Не удалось остаться в ShopZone","Error",nil,5); return end
+                    if not group.sellerRoot then
+                        local seller=group.shop:FindFirstChild("Seller",true); group.seller=seller; group.sellerRoot=seller and seller:FindFirstChild("HumanoidRootPart")
+                    end
+                    if not group.sellerRoot then Notify("Buy","Продавец не найден в ShopZone","Error",nil,5); return end
+                    walkTo(group.sellerRoot.Position,function()
+                        local _,rr=getChar()
+                        if not rr or not pointInsideZone(group.shop,rr.Position) then Notify("Buy","Вышли из ShopZone до оплаты","Error",nil,5); return end
+                        local cd=group.seller and group.seller:FindFirstChild("ClickDetector",true)
                         if cd then clickDetector(cd) end
-                    end
-                    task.wait(1)
-                    local shopRemotes = ReplicatedStorage:FindFirstChild("ShopRemotes")
-                    local cp = shopRemotes and shopRemotes:FindFirstChild("ConfirmPurchase")
-                    local before = getBalance()
-                    if before <= 0 then before = balance end
-                    if not cp or not cp:IsA("RemoteEvent") then
-                        Notify("Buy", "ConfirmPurchase не найден", "Error", nil, 4)
-                        return
-                    end
-                    pcall(function() cp:FireServer() end)
-                    local paid, after = waitForBalanceDrop(before, expected)
-                    if not paid then
-                        Notify("Buy", "Оплата корзины не подтверждена: было " .. math.floor(before) .. ", стало " .. math.floor(after or 0) .. ", ожидалось " .. math.floor(expected), "Error", nil, 6)
-                        return
-                    end
-                    Notify("Buy", "Оплачено: " .. math.floor(expected) .. " ₽ | остаток " .. math.floor(after), "Success", nil, 3)
-                    task.wait(1)
-                    nextGroup()
-                end, 10)
+                        task.wait(1)
+                        local cp=ReplicatedStorage:FindFirstChild("ShopRemotes") and ReplicatedStorage.ShopRemotes:FindFirstChild("ConfirmPurchase")
+                        local before=readBalanceStable()
+                        if before<expected then Notify("Buy","Баланс изменился до оплаты","Error",nil,5); return end
+                        if not cp or not cp:IsA("RemoteEvent") then Notify("Buy","ConfirmPurchase не найден","Error",nil,5); return end
+                        HLog("BUY","ConfirmPurchase", "expected="..expected, "before="..before, "shop="..group.shop:GetFullName())
+                        local ok,err=pcall(function() cp:FireServer() end)
+                        if not ok then HLog("ERROR","ConfirmPurchase",err); return end
+                        local paid,after=waitForBalanceDrop(before,expected)
+                        if not paid then Notify("Buy","Оплата не подтверждена","Error",nil,6); HLog("ERROR","PAYMENT_NOT_CONFIRMED",before,after,expected); return end
+                        Notify("Buy","Оплачено "..math.floor(expected).." ₽ | остаток "..math.floor(after),"Success",nil,3)
+                        task.wait(1); nextGroup()
+                    end,5)
+                end)
                 return
             end
-
-            local item = group.items[idx]
-            idx = idx + 1
-            walkTo(item.pos, function()
-                if item.detector then clickDetector(item.detector) end
-                task.wait(0.7)
-                nextItem()
-            end, 10)
+            ensureInside(function()
+                local item=group.items[idx]; idx+=1
+                if not item.pos or not pointInsideZone(group.shop,item.pos) then Notify("Buy","Пропуск предмета вне ShopZone","Error",nil,4); nextItem(); return end
+                walkTo(item.pos,function()
+                    local _,r=getChar()
+                    if not r or not pointInsideZone(group.shop,r.Position) then ensureInside(nextItem); return end
+                    if item.detector then clickDetector(item.detector) else Notify("Buy","ClickDetector отсутствует","Error",nil,4); return end
+                    task.wait(.7); nextItem()
+                end,5)
+            end)
         end
-        nextItem()
+        ensureInside(nextItem)
     end
-
     nextGroup()
 end
-
 local function clearTable(t)
     for k, v in pairs(t) do
         if typeof(v) == "Instance" then
@@ -825,48 +859,62 @@ local function getLiveMannequins()
             result[#result + 1] = {mannequin = man, ref = ref, rarity = normalizeRarity(data.rarity), name = data.name, price = tonumber(data.price) or 0, profit = data.profit or 0, data = data, shop = getItemShop(ref)}
         end
     end
+    for _, tag in ipairs(CollectionService:GetAllTags()) do
+        local low=tag:lower()
+        if low:find("mannequin") or low:find("clothing") or low:find("shop") or low:find("item") then
+            for _,obj in ipairs(CollectionService:GetTagged(tag)) do
+                local pos=getPos(obj)
+                local name=obj:GetAttribute("ItemName") or obj:GetAttribute("Name") or obj.Name
+                local rarity=normalizeRarity(obj:GetAttribute("Rarity") or obj:GetAttribute("rarity") or obj:GetAttribute("ItemRarity"))
+                local price=tonumber(obj:GetAttribute("Price") or obj:GetAttribute("price")) or 0
+                local cat=name and CATALOG[tostring(name):lower()]
+                rarity=rarity or (cat and normalizeRarity(cat.rarity))
+                price=price>0 and price or (cat and tonumber(cat.fairPrice) or 0)
+                if pos and rarity then result[#result+1]={mannequin=obj:IsA("Model") and obj or nil,ref=obj,rarity=rarity,name=name,price=price,profit=0,data=nil,shop=getItemShop(obj),position=pos,tagged=true} end
+            end
+        end
+    end
+    for _, rec in pairs(state.remoteRecords) do
+        if rec.position and rec.rarity then
+            local selected = state.chamsRarity == "All" or normalizeRarity(state.chamsRarity) == normalizeRarity(rec.rarity)
+            if selected then
+                result[#result+1] = {mannequin=nil, ref=nil, rarity=normalizeRarity(rec.rarity), name=rec.name, price=rec.price or 0, profit=((rec.fairPrice or 0)>0 and (rec.price or 0)>0) and math.max(0,math.floor(rec.fairPrice*0.98-rec.price)) or 0, data=nil, shop=nil, position=rec.position, remote=true}
+            end
+        end
+    end
     return result
 end
 
 local function updateChams()
     clearTable(state.chamsHighlights)
-    for key, proxy in pairs(state.chamsProxies) do
-        pcall(function() proxy:Destroy() end)
-        state.chamsProxies[key] = nil
-    end
-    if not state.chams then return end
-    local cnt = 0
-    local liveRefs = {}
-    for _, item in ipairs(getLiveMannequins()) do
-        local rarity = normalizeRarity(item.rarity)
-        local selected = state.chamsRarity == "All" or normalizeRarity(state.chamsRarity) == rarity
-        if selected and item.mannequin.Parent then
-            liveRefs[item.ref] = true
-            local color = RARITY_COLORS[rarity] or Color3.fromRGB(255,255,255)
-            local hl = makeHL(item.mannequin, color, 0.4)
-            if hl then
-                state.chamsHighlights[item.mannequin] = hl
-                cnt = cnt + 1
-            end
+    for key, proxy in pairs(state.chamsProxies) do pcall(function() proxy:Destroy() end); state.chamsProxies[key]=nil end
+    if not state.chams then return 0 end
+    local cnt=0; local liveRefs={}
+    for _,item in ipairs(getLiveMannequins()) do
+        local rarity=normalizeRarity(item.rarity)
+        local selected=state.chamsRarity=="All" or normalizeRarity(state.chamsRarity)==rarity
+        local color=RARITY_COLORS[rarity] or Color3.fromRGB(255,255,255)
+        if selected and item.mannequin and item.mannequin.Parent then
+            liveRefs[item.ref]=true
+            local hl=makeHL(item.mannequin,color,.4)
+            if hl then state.chamsHighlights[item.mannequin]=hl; cnt+=1 end
+        elseif selected and item.position then
+            local key="remote:"..tostring(item.name)..":"..tostring(item.position)
+            local proxy=makeChamsProxy(item.position,color)
+            if proxy then state.chamsProxies[key]=proxy; cnt+=1 end
         end
     end
-    for ref, data in pairs(state.slotData) do
+    for ref,data in pairs(state.slotData) do
         if not liveRefs[ref] and data.position and data.rarity then
-            local rarity = normalizeRarity(data.rarity)
-            local selected = state.chamsRarity == "All" or normalizeRarity(state.chamsRarity) == rarity
-            if selected then
-                local color = RARITY_COLORS[rarity] or Color3.fromRGB(255,255,255)
-                local proxy = makeChamsProxy(data.position, color)
-                if proxy then
-                    state.chamsProxies[ref] = proxy
-                    cnt = cnt + 1
-                end
+            local rarity=normalizeRarity(data.rarity)
+            if state.chamsRarity=="All" or normalizeRarity(state.chamsRarity)==rarity then
+                local proxy=makeChamsProxy(data.position,RARITY_COLORS[rarity] or Color3.fromRGB(255,255,255))
+                if proxy then state.chamsProxies[ref]=proxy; cnt+=1 end
             end
         end
     end
     return cnt
 end
-
 local function startChams()
     if state.chams then return end
     state.chams = true
@@ -932,35 +980,31 @@ end
 
 local function updateHelpBuy()
     clearTable(state.helpBuyHighlights)
-    for _, l in pairs(state.helpBuyLabels) do pcall(function() l:Destroy() end) end
-    state.helpBuyLabels = {}
+    for _,l in pairs(state.helpBuyLabels) do pcall(function() l:Destroy() end) end
+    state.helpBuyLabels={}
     if not state.helpBuy then return end
-    local cnt = 0
-    local _, playerHrp = getChar()
-    if not playerHrp then return end
-    for ref, data in pairs(state.slotData) do
-        local man = getItemMannequin(ref)
-        local manPos = man and getPos(man)
-        local distance = manPos and (manPos - playerHrp.Position).Magnitude
-        if ref.Parent and man and man.Parent and distance and distance <= 20 and data.profit and data.profit > 0 then
-            cnt = cnt + 1
-            local color
-            if data.profit >= 4000 then color = Color3.fromRGB(255, 70, 70)
-            elseif data.profit >= 1500 then color = Color3.fromRGB(255, 170, 40)
-            else color = Color3.fromRGB(70, 230, 120) end
-            
-            local man = getItemMannequin(ref)
-            local hl = man and makeHL(man, color, 0.85)
-            if hl then state.helpBuyHighlights[cnt] = hl end
-            
-            local roi = data.price > 0 and math.floor((data.profit / data.price) * 100) or 0
-            local text = "[" .. (data.rarity or "?") .. "] $" .. data.price .. " → +$" .. data.profit .. " (" .. roi .. "%)"
-            local bb = man and makeBillboard(man, text, color)
-            if bb then state.helpBuyLabels[cnt] = bb end
+    local _,playerHrp=getChar(); if not playerHrp then return end
+    local cnt=0
+    for _,item in ipairs(getLiveMannequins()) do
+        local man=item.mannequin; local pos=item.position or (man and getPos(man))
+        if man and man.Parent and pos and (pos-playerHrp.Position).Magnitude<=20 then
+            local price=tonumber(item.price) or 0
+            local fair=tonumber(item.data and item.data.fairPrice) or 0
+            if fair<=0 then
+                local cat=item.name and CATALOG[tostring(item.name):lower()]; fair=cat and tonumber(cat.fairPrice) or 0
+            end
+            local profit=tonumber(item.profit) or ((fair>0 and price>0) and math.floor(fair*.98-price) or 0)
+            if profit>0 then
+                cnt+=1
+                local color=profit>=4000 and Color3.fromRGB(255,70,70) or profit>=1500 and Color3.fromRGB(255,170,40) or Color3.fromRGB(70,230,120)
+                local hl=makeHL(man,color,.85); if hl then state.helpBuyHighlights[cnt]=hl end
+                local roi=price>0 and math.floor(profit/price*100) or 0
+                local text="["..tostring(item.rarity or "?").."] "..math.floor(price).." ₽ → +"..math.floor(profit).." ₽ ("..roi.."%)"
+                local bb=makeBillboard(man,text,color); if bb then state.helpBuyLabels[cnt]=bb end
+            end
         end
     end
 end
-
 local function startHelpBuy()
     if state.helpBuy then return end
     state.helpBuy = true
@@ -1302,7 +1346,19 @@ secSET:AddButton({
     Title = "Показать баланс", Icon = "solar/wallet-bold",
     Callback = function()
         local b = getBalance()
-        Notify("Баланс", tostring(b) .. " ₽", "Info", nil, 3)
+        Notify("Баланс", tostring(math.floor(b)) .. " ₽ | " .. tostring(state.balanceLastSource), "Info", nil, 5)
+        HLog("BALANCE", b, state.balanceLastSource)
+    end
+})
+
+secSET:AddButton({
+    Title = "Диагностика", Icon = "solar/bug-bold",
+    Callback = function()
+        HLog("DIAG", "balance", getBalance(), "source", state.balanceLastSource, "slotData", #state.slotData)
+        for _,obj in ipairs(ReplicatedStorage:GetDescendants()) do
+            if obj:IsA("RemoteEvent") and (obj.Name:lower():find("shop") or obj.Name:lower():find("cloth") or obj.Name:lower():find("item") or obj.Name:lower():find("catalog") or obj.Name:lower():find("price")) then HLog("REMOTE", obj:GetFullName()) end
+        end
+        Notify("Диагностика", "Данные отправлены в консоль Delta", "Success", nil, 3)
     end
 })
 
