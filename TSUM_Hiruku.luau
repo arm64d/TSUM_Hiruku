@@ -130,6 +130,14 @@ local function getChar()
     return c, c:FindFirstChild("HumanoidRootPart"), c:FindFirstChildOfClass("Humanoid")
 end
 
+LocalPlayer.CharacterAdded:Connect(function()
+    stopWalk()
+    task.wait(0.5)
+    local c = LocalPlayer.Character
+    local hum = c and c:FindFirstChildOfClass("Humanoid")
+    if hum then hum.WalkSpeed = state.walkSpeed end
+end)
+
 local function getPos(obj)
     if not obj then return nil end
     if obj:IsA("BasePart") then return obj.Position end
@@ -216,13 +224,13 @@ end
 local function walkTo(targetPos, onArrive, stopDist)
     stopDist = stopDist or 8
     stopWalk()
-    
+
     local c = LocalPlayer.Character
     if not c then return end
     local hrp = c:FindFirstChild("HumanoidRootPart")
     local hum = c:FindFirstChildOfClass("Humanoid")
     if not hrp or not hum then return end
-    
+
     hum.WalkSpeed = state.walkSpeed
     state.walking = true
     state.walkTarget = targetPos
@@ -230,28 +238,61 @@ local function walkTo(targetPos, onArrive, stopDist)
     state.walkStuck = 0
     state.walkStart = tick()
     state.walkRecalc = 0
-    
+    state.walkCharacter = c
+
     state.walkWaypoints = buildPath(hrp, targetPos)
-    if state.walkWaypoints and state.walkWaypoints[2] then
-        state.walkWpIndex = 2
-        hum:MoveTo(state.walkWaypoints[2].Position)
-    else
-        hum:MoveTo(targetPos)
+    state.walkWpIndex = 2
+
+    local function issueMove(currentHrp, currentHum)
+        if not state.walking or not currentHrp or not currentHum then return end
+        local waypoints = state.walkWaypoints
+        local wp = waypoints and waypoints[state.walkWpIndex]
+        if wp then
+            if wp.Action == Enum.PathWaypointAction.Jump then
+                currentHum.Jump = true
+            end
+            currentHum:MoveTo(wp.Position)
+        else
+            currentHum:MoveTo(targetPos)
+        end
     end
-    
+
+    issueMove(hrp, hum)
+
     state.walkConn = RunService.Heartbeat:Connect(function()
         if not state.walking then return end
-        if not hrp.Parent or not hum.Parent then stopWalk() return end
-        if tick() - state.walkStart > 60 then stopWalk() return end
-        
-        local curPos = hrp.Position
-        local dist = (targetPos - curPos).Magnitude
-        if dist < stopDist then
+        if tick() - state.walkStart > 60 then
             stopWalk()
-            if onArrive then onArrive() end
             return
         end
-        
+
+        local currentChar = LocalPlayer.Character
+        local currentHrp = currentChar and currentChar:FindFirstChild("HumanoidRootPart")
+        local currentHum = currentChar and currentChar:FindFirstChildOfClass("Humanoid")
+        if not currentChar or not currentHrp or not currentHum then
+            return
+        end
+
+        if state.walkCharacter ~= currentChar then
+            state.walkCharacter = currentChar
+            currentHum.WalkSpeed = state.walkSpeed
+            state.walkLastPos = currentHrp.Position
+            state.walkStuck = 0
+            state.walkWaypoints = buildPath(currentHrp, targetPos)
+            state.walkWpIndex = 2
+            issueMove(currentHrp, currentHum)
+            return
+        end
+
+        local curPos = currentHrp.Position
+        local dist = (targetPos - curPos).Magnitude
+
+        if dist < stopDist then
+            stopWalk()
+            if onArrive then task.spawn(onArrive) end
+            return
+        end
+
         local moved = (curPos - state.walkLastPos).Magnitude
         if moved < 0.05 then
             state.walkStuck = state.walkStuck + (1/60)
@@ -259,31 +300,25 @@ local function walkTo(targetPos, onArrive, stopDist)
             state.walkStuck = 0
         end
         state.walkLastPos = curPos
-        
+
         if state.walkStuck > 5 then
             state.walkStuck = 0
             state.walkRecalc = (state.walkRecalc or 0) + 1
-            if state.walkRecalc > 3 then stopWalk() return end
-            state.walkWaypoints = buildPath(hrp, targetPos)
-            if state.walkWaypoints and state.walkWaypoints[2] then
-                state.walkWpIndex = 2
-                hum:MoveTo(state.walkWaypoints[2].Position)
+            if state.walkRecalc > 6 then
+                state.walkRecalc = 0
             end
-            return
+            state.walkWaypoints = buildPath(currentHrp, targetPos)
+            state.walkWpIndex = 2
         end
-        
+
         if state.walkWaypoints then
             local wp = state.walkWaypoints[state.walkWpIndex]
-            if not wp then hum:MoveTo(targetPos) return end
-            if (wp.Position - curPos).Magnitude < 5 then
+            if wp and (wp.Position - curPos).Magnitude < 5 then
                 state.walkWpIndex = state.walkWpIndex + 1
-                local nextWp = state.walkWaypoints[state.walkWpIndex]
-                if nextWp then
-                    if nextWp.Action == Enum.PathWaypointAction.Jump then hum.Jump = true end
-                    hum:MoveTo(nextWp.Position)
-                end
             end
         end
+
+        issueMove(currentHrp, currentHum)
     end)
 end
 
@@ -321,28 +356,74 @@ local function findBarigaPrompt()
     return nil
 end
 
+local function closeBariga()
+    local pg = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not pg then return end
+
+    local barigaUI = pg:FindFirstChild("BarigaUI")
+    if not barigaUI then return end
+
+    local candidates = {
+        barigaUI:FindFirstChild("CloseBariga", true),
+        barigaUI:FindFirstChild("Close", true),
+        barigaUI:FindFirstChild("Exit", true),
+        barigaUI:FindFirstChild("Back", true),
+    }
+
+    for _, btn in ipairs(candidates) do
+        if btn and btn:IsA("GuiButton") and btn.Visible then
+            if clickGuiButton(btn) then
+                task.wait(0.5)
+                return
+            end
+        end
+    end
+
+    pcall(function()
+        barigaUI.Enabled = false
+    end)
+end
+
 local function sellAllToBariga(onDone)
     local br = ReplicatedStorage:FindFirstChild("BarigaRemotes")
-    if not br then return end
-    
+    if not br then
+        closeBariga()
+        if onDone then onDone() end
+        return
+    end
+
     local prompt = findBarigaPrompt()
-    if not prompt then return end
+    if not prompt then
+        closeBariga()
+        if onDone then onDone() end
+        return
+    end
+
     pcall(function() fireproximityprompt(prompt) end)
-    
+
     task.wait(2)
     local pg = LocalPlayer:WaitForChild("PlayerGui")
     local rGui = pg:FindFirstChild("BarigaResponseGui")
-    if not rGui then return end
+    if not rGui then
+        closeBariga()
+        if onDone then onDone() end
+        return
+    end
+
     local responses = rGui:FindFirstChild("Responses")
     local r1 = responses and responses:FindFirstChild("Response1")
     if r1 then clickGuiButton(r1) end
-    
+
     task.wait(2)
     local barigaUI = pg:FindFirstChild("BarigaUI")
-    if not barigaUI then return end
-    
+    if not barigaUI then
+        closeBariga()
+        if onDone then onDone() end
+        return
+    end
+
     task.wait(3)
-    
+
     local seller = barigaUI:FindFirstChild("Seller")
     if seller then
         local actionFrame = seller:FindFirstChild("ActionFrame")
@@ -351,9 +432,9 @@ local function sellAllToBariga(onDone)
             if accept then clickGuiButton(accept) end
         end
     end
-    
+
     task.wait(2)
-    
+
     local prompt2 = barigaUI:FindFirstChild("SellingPrompt")
     if prompt2 then
         local down = prompt2:FindFirstChild("Down")
@@ -362,8 +443,10 @@ local function sellAllToBariga(onDone)
             if yes and yes.Visible then clickGuiButton(yes) end
         end
     end
-    
+
     task.wait(5)
+    closeBariga()
+    task.wait(0.5)
     if onDone then onDone() end
 end
 
@@ -486,7 +569,8 @@ local function updateChams()
     local cnt = 0
     for ref, data in pairs(state.slotData) do
         if data.rarity == state.chamsRarity and ref.Parent then
-            local hl = makeHL(ref, color, 0.4)
+            local man = getItemMannequin(ref)
+            local hl = man and makeHL(man, color, 0.4)
             if hl then state.chamsHighlights[ref] = hl end
             cnt = cnt + 1
         end
@@ -559,20 +643,26 @@ local function updateHelpBuy()
     state.helpBuyLabels = {}
     if not state.helpBuy then return end
     local cnt = 0
+    local _, playerHrp = getChar()
+    if not playerHrp then return end
     for ref, data in pairs(state.slotData) do
-        if ref.Parent and data.profit and data.profit > 0 then
+        local man = getItemMannequin(ref)
+        local manPos = man and getPos(man)
+        local distance = manPos and (manPos - playerHrp.Position).Magnitude
+        if ref.Parent and man and man.Parent and distance and distance <= 20 and data.profit and data.profit > 0 then
             cnt = cnt + 1
             local color
             if data.profit >= 4000 then color = Color3.fromRGB(255, 70, 70)
             elseif data.profit >= 1500 then color = Color3.fromRGB(255, 170, 40)
             else color = Color3.fromRGB(70, 230, 120) end
             
-            local hl = makeHL(ref, color, 0.85)
+            local man = getItemMannequin(ref)
+            local hl = man and makeHL(man, color, 0.85)
             if hl then state.helpBuyHighlights[cnt] = hl end
             
             local roi = data.price > 0 and math.floor((data.profit / data.price) * 100) or 0
             local text = "[" .. (data.rarity or "?") .. "] $" .. data.price .. " → +$" .. data.profit .. " (" .. roi .. "%)"
-            local bb = makeBillboard(ref, text, color)
+            local bb = man and makeBillboard(man, text, color)
             if bb then state.helpBuyLabels[cnt] = bb end
         end
     end
@@ -603,11 +693,12 @@ end
 local function getMannequinsByRarity(rarity)
     local list = {}
     for ref, data in pairs(state.slotData) do
-        if data.rarity == rarity and ref.Parent then
-            local pos = getPos(ref)
+        local man = getItemMannequin(ref)
+        if data.rarity == rarity and ref.Parent and man and man.Parent then
+            local pos = getPos(man)
             local cd = getItemDetector(ref)
-            if pos then
-                table.insert(list, { pos = pos, detector = cd, data = data, ref = ref })
+            if pos and cd then
+                table.insert(list, { pos = pos, detector = cd, data = data, ref = ref, mannequin = man })
             end
         end
     end
@@ -617,11 +708,12 @@ end
 local function getAllItems()
     local list = {}
     for ref, data in pairs(state.slotData) do
-        if ref.Parent and data.profit and data.profit > 0 then
-            local pos = getPos(ref)
+        local man = getItemMannequin(ref)
+        if ref.Parent and man and man.Parent and data.profit and data.profit > 0 then
+            local pos = getPos(man)
             local cd = getItemDetector(ref)
             if pos and cd then
-                table.insert(list, { pos = pos, detector = cd, data = data, ref = ref })
+                table.insert(list, { pos = pos, detector = cd, data = data, ref = ref, mannequin = man })
             end
         end
     end
@@ -671,6 +763,8 @@ local function autoBuyLoop()
                     walkTo(bariga.pos, function()
                         sellAllToBariga()
                     end, 10)
+                else
+                    Notify("Bariga", "Не найден", "Error", nil, 3)
                 end
             end)
         end
@@ -729,6 +823,8 @@ local function fullSellLoop()
                     walkTo(bariga.pos, function()
                         sellAllToBariga()
                     end, 10)
+                else
+                    Notify("Bariga", "Не найден", "Error", nil, 3)
                 end
             end)
         end
